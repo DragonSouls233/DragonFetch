@@ -55,9 +55,11 @@ DEFAULTS: Dict[str, Any] = {
         "timeout": 8,
     },
     "sites": {
-        # 多站点（通用 13 站解析）——数据统一落在 DATA/multisite
+        # 多站点（通用站点解析）——数据统一落在 DATA/multisite
         "download_dir": str(paths.data_dir("multisite", "downloads")),
-        "proxy_enabled": False,   # 解析默认直连；个别站需要代理时可在页面单独开
+        # 实测（2026-10）：这批站点直连 ConnectTimeout，走 socks5h 代理 200。
+        # 所以默认开代理；个别站可在此关掉。
+        "proxy_enabled": True,
         "pages": 2,
         "timeout": 30,
     },

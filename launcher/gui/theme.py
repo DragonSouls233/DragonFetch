@@ -201,7 +201,7 @@ QProgressBar::chunk { background: $accent; border-radius: 5px; }
 /* 大号进度条：下载页用，需要看得见百分比 */
 QProgressBar#Big {
     min-height: 18px; max-height: 18px; border-radius: 9px;
-    color: $sub; font-size: 11px;
+    background: $border; color: $sub; font-size: 11px;
 }
 QProgressBar#Big::chunk { border-radius: 9px; }
 

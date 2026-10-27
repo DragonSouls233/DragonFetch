@@ -81,6 +81,81 @@ def probe(url: str, proxy: str | None = None) -> VideoInfo:
     )
 
 
+def info_meta(url: str, proxy: str | None = None, timeout: int = 120) -> dict:
+    """用 yt-dlp ``-J`` 取一条视频的完整元信息，并归一化成前端表格要的字段。
+
+    为什么单独有这个函数
+    --------------------
+    「多站点」页的「解析直链」按钮对 **yt-dlp 有 extractor 的站点** 不该走
+    ``unofficial-api``（那类站点本来就不需要站点包），但用户仍然希望点一下就能
+    看到时长 / 作者 / 观看数 / 日期 / 分类，并拿到能直接下载的地址。
+    这就是 yt-dlp 的 ``-J`` 能给的：一次请求，全部字段都有。
+
+    Returns:
+        ``{"title","duration","author","views","date","categories","direct_url",
+        "direct_urls","thumbnail","site"}``，缺字段给空字符串。
+    """
+    u = extract_url(url)
+    if not u.lower().startswith("http"):
+        raise ValueError("请输入有效的视频链接")
+    cmd = [ytdlp_path(), "-J", "--no-playlist", "--no-warnings"]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd.append(u)
+    out = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", timeout=timeout)
+    if out.returncode != 0:
+        raise RuntimeError(_tail(out.stderr) or "解析失败")
+    info = json.loads(out.stdout or "{}")
+    if info.get("_type") == "playlist" and info.get("entries"):
+        info = info["entries"][0]
+
+    secs = int(info.get("duration") or 0)
+    duration = ""
+    if secs > 0:
+        h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+        duration = f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    raw_date = str(info.get("upload_date") or "")
+    date = (f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+            if len(raw_date) == 8 else raw_date)
+
+    cats = [c for c in (info.get("categories") or []) if c]
+    if not cats:
+        cats = [t for t in (info.get("tags") or [])[:4] if t]
+
+    views = info.get("view_count")
+    if isinstance(views, int) and views >= 0:
+        views = f"{views / 1_000_000:.1f}M" if views >= 1_000_000 else (
+            f"{views / 1000:.0f}K" if views >= 1000 else str(views))
+    else:
+        views = ""
+
+    # 直链：优先「音视频合体」的最高画质（单独的视频流拿下来没声音），
+    # 没有合体流时退回最高画质的视频流。
+    formats = [f for f in (info.get("formats") or []) if f.get("url")]
+    progressive = [f for f in formats
+                   if f.get("vcodec", "none") != "none"
+                   and f.get("acodec", "none") != "none"]
+    pool = progressive or [f for f in formats if f.get("vcodec", "none") != "none"] or formats
+    pool.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
+    urls = [f["url"] for f in pool if f.get("url")]
+
+    return {
+        "title": info.get("title") or "未命名",
+        "duration": duration,
+        "author": (info.get("uploader") or info.get("creator")
+                   or info.get("channel") or ""),
+        "views": views,
+        "date": date,
+        "categories": cats,
+        "direct_url": urls[-1] if urls else "",
+        "direct_urls": urls,
+        "thumbnail": info.get("thumbnail") or "",
+        "site": info.get("extractor_key") or "",
+    }
+
+
 def download(
     url: str,
     outdir: str,

@@ -161,8 +161,12 @@ class SettingsPage(Page):
         form.addRow("黄果下载", _dir_row(self.ed_hg, self))
         self.ed_yt = QLineEdit(s.get("yttiktok.download_dir", ""))
         form.addRow("映取下载", _dir_row(self.ed_yt, self))
+        self.ed_js = QLineEdit(s.get("jiuse.download_dir", ""))
+        form.addRow("九色下载", _dir_row(self.ed_js, self))
         self.ed_sites = QLineEdit(s.get("sites.download_dir", ""))
         form.addRow("多站点下载", _dir_row(self.ed_sites, self))
+        self.ed_mq = QLineEdit(s.get("madouqu.download_dir", ""))
+        form.addRow("麻豆下载", _dir_row(self.ed_mq, self))
         dl.addLayout(form)
         grid.addWidget(dirs_card, 1, 0)
 
@@ -273,12 +277,14 @@ class SettingsPage(Page):
                 "parallel": int(self.sp_yt_par.value()),
             },
             "sites": {"download_dir": self.ed_sites.text().strip()},
+            "jiuse": {"download_dir": self.ed_js.text().strip()},
+            "madouqu": {"download_dir": self.ed_mq.text().strip()},
             "theme": "dark" if self.cmb_theme.currentIndex() == 0 else "light",
             "ui": {"font_size": int(self.sp_font.value())},
         })
         path = s.save()
         for d in (self.ed_tx.text(), self.ed_hg.text(), self.ed_yt.text(),
-                  self.ed_sites.text()):
+                  self.ed_js.text(), self.ed_sites.text(), self.ed_mq.text()):
             try:
                 os.makedirs(d, exist_ok=True)
             except Exception:

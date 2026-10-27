@@ -359,17 +359,25 @@ class SitesPage(Page):
         self._set_busy(True, "解析中")
 
         def _run(progress=None):
-            svc = backend.site_service()
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
             out = []
-            for i, u in enumerate(urls, 1):
-                if progress:
-                    progress(int(i * 100 / max(1, len(urls))), f"解析 {i}/{len(urls)}")
-                try:
-                    r = asyncio.run(svc.resolve(u, proxy=proxy))
-                except Exception as exc:  # noqa: BLE001
-                    out.append((u, None, str(exc)))
-                    continue
-                out.append((u, r.to_dict() if r else None, ""))
+            total = max(1, len(urls))
+            workers = max(1, min(4, len(urls)))
+
+            def _one(u):
+                return backend.resolve_meta(u, proxy=proxy)
+
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(_one, u): u for u in urls}
+                for i, fut in enumerate(as_completed(futs), 1):
+                    if progress:
+                        progress(int(i * 100 / total), f"解析 {i}/{total}")
+                    u = futs[fut]
+                    try:
+                        out.append((u, fut.result(), ""))
+                    except Exception as exc:  # noqa: BLE001
+                        out.append((u, None, str(exc)))
             return out
 
         task = Task(_run, want_progress=True)
@@ -548,10 +556,14 @@ class SitesPage(Page):
             "duration": data.get("duration") or it.get("duration", ""),
             "author": data.get("author") or it.get("author", ""),
             "views": data.get("views") or it.get("views", ""),
-            "date": data.get("publish_date") or it.get("date", ""),
-            "categories": ", ".join(data.get("categories") or []) or it.get("categories", ""),
+            "date": (data.get("publish_date") or data.get("date")
+                     or it.get("date", "")),
+            "categories": (", ".join(data.get("categories") or [])
+                           or it.get("categories", "")),
         })
         urls = data.get("direct_urls") or []
+        if data.get("direct_url") and not urls:
+            urls = [data["direct_url"]]
         if urls:
             it["direct"] = urls[-1]
         self._refresh_row(row)
@@ -706,10 +718,10 @@ class SitesPage(Page):
         if not base:
             self.notify("请先选择保存目录", "warn")
             return
-        group = self.ed_group.text().strip() or (self.ed_group.placeholderText()
-                                                .replace("可选：默认 ", "").strip())
-        if group and group != self._site_key():
-            base = os.path.join(base, _safe_name(group, self._site_key() or "downloads"))
+        # 分组名留空时按「站点名」建子目录，避免不同站的文件混在一个目录里
+        group = self.ed_group.text().strip() or self._site_key()
+        if group:
+            base = os.path.join(base, _safe_name(group, "downloads"))
         try:
             os.makedirs(base, exist_ok=True)
         except OSError as exc:

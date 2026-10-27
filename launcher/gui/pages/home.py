@@ -65,7 +65,9 @@ class HomePage(Page):
         rows = [
             ("糖心 Vlog", "演员云 → 作品库 → 直链下载；导航页用代理读，站点可直连", "tangxin"),
             ("黄果短剧", "剧库浏览 → 选集 → 并发队列下载；镜像域名由发布页刷新", "huangguo"),
-            ("多站点", "JAVDB 采集 / Madouqu 磁力 / 通用链接解析下载", "sites"),
+            ("九色视频", "地址页取最新入口 → 线路检测 → 直连解析下载（不挂代理）", "jiuse"),
+            ("多站点", "解析直链 / 抓取列表 / 搜索 → 勾选批量下载（12 站）", "sites"),
+            ("麻豆磁力", "独立模块：按关键词抓 BT 磁力，可入库、导出", "madouqu"),
             ("映取 · YT/TikTok", "YouTube / TikTok / 通用站点，基于共享 yt-dlp", "yttiktok"),
             ("导航页 · 黄视频", "daohang.pro 入口表 + 黄视频站点解析下载", "nav"),
         ]
@@ -132,12 +134,14 @@ class HomePage(Page):
             c3.set_hint(f"站点 {site.get('site_name') or site.get('site_id') or '-'}")
 
         c4 = self._stats_cards["sites_count"]
+        js = data.get("jiuse") or {}
         if st.get("error"):
             c4.set_value("—")
             c4.set_hint(st["error"][:40])
         else:
             c4.set_value(st.get("count", 0))
-            c4.set_hint("已注册站点")
+            n_js = len(js.get("addresses") or [])
+            c4.set_hint(f"九色线路 {n_js} 条" if n_js else "已注册站点")
 
         self.lbl_env.setText(
             f"yt-dlp {data.get('ytdlp', '-')} · 数据根 {paths.rel(paths.DATA)} · "

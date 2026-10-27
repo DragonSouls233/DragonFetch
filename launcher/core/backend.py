@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import sys
@@ -233,7 +234,7 @@ def multisite() -> SimpleNamespace:
 def site_service():
     """取多站点解析服务单例（代理跟随设置，直连站点可显式置空）。"""
     s = settings()
-    proxy = s.proxy_url if s.get("multisite.proxy_enabled", False) else ""
+    proxy = s.proxy_url if s.get("sites.proxy_enabled", True) else ""
     return multisite().service.get_site_service(proxy=proxy or None)
 
 
@@ -253,6 +254,71 @@ def site_list() -> list:
             "ytdlp": bool(getattr(spec, "ytdlp", False)),
         })
     return out
+
+
+def _norm_date(value) -> str:
+    """把 ``2022-06-03T22:00:00+00:00`` / ``20220603`` 统一成 ``2022-06-03``。"""
+    s = str(value or "").strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s
+
+
+def resolve_meta(url: str, proxy: str | None = None) -> dict:
+    """解析单个视频页，返回前端表格要的全部字段（含直链）。
+
+    两条链路按站点分流：
+      * yt-dlp 没有 extractor 的站点（porntrex / xfreehd / thumbzilla）
+        → 站点包 ``unofficial-api`` 解析直链；
+      * 其余站点 → yt-dlp ``-J``（一次拿到标题/时长/直链）。
+
+    之后再拿站点包「补空」：有的站点 yt-dlp 不给观看数/日期，而
+    ``unofficial-api`` 恰好给（实测 xvideos：yt-dlp 无 views/date，
+    eaf 有 views=145,746、publish_date=2022-06-03）。
+    """
+    svc = site_service()
+    spec = svc.detect(url)
+    data: dict = {}
+
+    if spec is not None and spec.needs_eaf_resolution:
+        r = asyncio.run(svc.resolve(url, proxy=proxy))
+        if r is not None:
+            data = r.to_dict()
+    else:
+        data = dict(ytdlp().service.info_meta(url, proxy=proxy))
+
+    if spec is not None and not spec.needs_eaf_resolution:
+        sparse = not (data.get("author") and data.get("views") and data.get("date")
+                      and data.get("categories"))
+        if sparse:
+            try:
+                from multisite.sites import eaf_adapter
+
+                if eaf_adapter.is_available(spec):
+                    extra = asyncio.run(eaf_adapter.fetch_video(
+                        spec, url, proxy=proxy, timeout=20))
+                    if extra is not None:
+                        d = extra.to_dict()
+                        for src, dst in (("author", "author"), ("views", "views"),
+                                         ("publish_date", "date"),
+                                         ("duration", "duration")):
+                            if not data.get(dst) and d.get(src):
+                                data[dst] = d[src]
+                        if not data.get("categories") and d.get("categories"):
+                            data["categories"] = list(d["categories"])
+                        if not (data.get("direct_urls") or data.get("direct_url")):
+                            if d.get("direct_urls"):
+                                data["direct_urls"] = list(d["direct_urls"])
+            except Exception:
+                pass
+
+    if data.get("date"):
+        data["date"] = _norm_date(data["date"])
+    if data.get("publish_date"):
+        data["publish_date"] = _norm_date(data["publish_date"])
+    return data
 
 
 # ------------------------------------------------------------------ 麻豆

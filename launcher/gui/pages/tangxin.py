@@ -28,6 +28,7 @@ from ...core.settings import settings
 from ...core.tasks import CENTER, Task
 from ..widgets import Badge, Card, HLine, SearchInput, make_table, open_path
 from .base import Page
+from ..preview import PreviewPane
 
 
 def _safe_name(text: str) -> str:
@@ -176,6 +177,9 @@ class TangxinPage(Page):
         self.tabs.addTab(self._tab_crawl(), "采集与下载")
         self.tabs.addTab(self._tab_records(), "下载记录")
         self.body.addWidget(self.tabs, 1)
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.body.addWidget(self.preview, 0)
 
         self._load_route_choices()
         self._update_pick()
@@ -274,6 +278,7 @@ class TangxinPage(Page):
         self.table_videos = make_table(
             ["选择", "标题", "时长", "本地状态", "编号"], [52, 350, 80, 96, 110])
         self.table_videos.itemChanged.connect(self._update_pick)
+        self.table_videos.itemSelectionChanged.connect(self._preview_selected)
         rrl.addWidget(self.table_videos, 1)
 
         bottom = QHBoxLayout()
@@ -623,6 +628,23 @@ class TangxinPage(Page):
         n = len(self._picked())
         self.lbl_pick.setText(f"已选 {n}")
         self.btn_download.setText(f"开始下载 ({n})" if n else "开始下载")
+
+    def _preview_selected(self) -> None:
+        row = self.table_videos.currentRow()
+        if row < 0:
+            return
+        item = self.table_videos.item(row, 0)
+        if not item:
+            return
+        v = item.data(Qt.ItemDataRole.UserRole)
+        if not v:
+            return
+        self.preview.preview(
+            title=getattr(v, "title", "") or "",
+            thumb=getattr(v, "cover_url", "") or None,
+            local_dir=settings().get("tangxin.output_base", "") or None,
+            local_hint=getattr(v, "title", "") or "",
+        )
 
     def _picked(self):
         out = []

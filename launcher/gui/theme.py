@@ -279,6 +279,19 @@ QLabel#StatValueSm { font-size: 18px; font-weight: 700; }
 QLabel#Warn { color: $warn; font-size: 12px; }
 QLabel#Ok { color: $ok; font-size: 12px; }
 QLabel#Err { color: $err; font-size: 12px; }
+
+/* ---------------- 内置预览面板 ---------------- */
+QFrame#PreviewPane {
+    background: $surface2;
+    border: 1px solid $border_soft;
+    border-radius: 12px;
+}
+QLabel#PreviewThumb {
+    background: $bg_alt;
+    border: 1px solid $border_soft;
+    border-radius: 8px;
+    color: $muted; font-size: 12px; padding: 6px;
+}
 """)
 
 

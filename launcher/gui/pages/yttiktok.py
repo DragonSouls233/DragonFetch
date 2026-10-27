@@ -25,6 +25,7 @@ from ...core.settings import settings
 from ...core.tasks import CENTER, Task
 from ..widgets import Badge, Card, HLine, make_table, open_path
 from .base import Page
+from ..preview import PreviewPane
 
 QUALITY = [
     ("最佳（自动）", None),
@@ -233,6 +234,12 @@ class YtTiktokPage(Page):
         ql.addWidget(self.table_q)
         self.body.addWidget(q_card)
 
+        # ---------------- 内置预览
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.body.addWidget(self.preview, 0)
+        self.table.itemSelectionChanged.connect(self._preview_selected)
+
     # ---------------------------------------------------------------- 工具
     @staticmethod
     def _ver() -> str:
@@ -265,6 +272,22 @@ class YtTiktokPage(Page):
         self._items = []
         self.table.setRowCount(0)
         self.lbl_parse.setText("空闲")
+
+    def _preview_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        item = self.table.item(row, 1)
+        if not item:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        self.preview.preview(
+            title=item.text(),
+            thumb=data.get("thumb") or None,
+            video=data.get("video") or None,
+            local_dir=settings().get("yttiktok.download_dir", "") or None,
+            local_hint=item.text(),
+        )
 
     # ---------------------------------------------------------------- 解析
     def parse_all(self) -> None:
@@ -312,6 +335,15 @@ class YtTiktokPage(Page):
             self.table.setItem(r, 0, chk)
             self.table.setItem(r, 1, QTableWidgetItem(
                 getattr(info, "title", "") if info else url))
+            if info:
+                _raw = getattr(info, "raw", {}) or {}
+                _fmts = _raw.get("formats") or []
+                _direct = _raw.get("url") or next(
+                    (f.get("url") for f in _fmts if f.get("url")), None)
+                self.table.item(r, 1).setData(
+                    Qt.ItemDataRole.UserRole,
+                    {"thumb": getattr(info, "thumbnail", "") or "",
+                     "video": _direct})
             self.table.setItem(r, 2, QTableWidgetItem(
                 getattr(info, "site", "") if info else "-"))
             self.table.setItem(r, 3, QTableWidgetItem(

@@ -39,6 +39,7 @@ from ...core.settings import settings
 from ...core.tasks import CENTER, Task
 from ..widgets import Card, LogPanel, make_table, open_path
 from .base import Page
+from ..preview import PreviewPane
 
 COLUMNS = ["选择", "标题", "时长", "作者", "观看", "日期", "分类", "URL"]
 WIDTHS = [58, 320, 92, 140, 92, 108, 160, 340]
@@ -149,6 +150,9 @@ class SitePage(Page):
         self.body.addWidget(self._build_actions(), 0)
         self.body.addWidget(self._build_log(), 0)
         self.body.addWidget(self._card_download(), 0)
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.body.addWidget(self.preview, 0)
 
     def _card_toolbar(self) -> QWidget:
         card = Card()
@@ -200,6 +204,7 @@ class SitePage(Page):
             | QAbstractItemView.EditTrigger.EditKeyPressed)
         self.table.itemChanged.connect(self._cell_changed)
         self.table.itemDoubleClicked.connect(self._row_double_clicked)
+        self.table.itemSelectionChanged.connect(self._preview_selected)
         return self.table
 
     def _build_actions(self) -> QWidget:
@@ -559,6 +564,17 @@ class SitePage(Page):
     def _row_double_clicked(self, item: QTableWidgetItem) -> None:
         if item.column() == 7 and item.text().strip():
             QDesktopServices.openUrl(QUrl(item.text().strip()))
+
+    def _preview_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._items):
+            return
+        it = self._items[row]
+        self.preview.preview(
+            title=it.get("title", "") or it.get("url", "") or "",
+            thumb=it.get("thumbnail") or it.get("cover") or it.get("poster") or None,
+            video=it.get("direct") or None,
+        )
 
     def _row_checked(self, row: int) -> bool:
         it = self.table.item(row, 0)

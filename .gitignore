@@ -34,3 +34,11 @@ desktop.ini
 
 # 本地 AI 工作区记忆
 .workbuddy/
+
+# 测试脚本（一律不上传 GitHub）
+tests/
+**/tests/
+**/test_*.py
+**/*_test.py
+**/test_parsers.py
+**/bench_batch_scale.py

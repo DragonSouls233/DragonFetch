@@ -55,10 +55,9 @@ DEFAULTS: Dict[str, Any] = {
         "timeout": 8,
     },
     "sites": {
-        # 多站点（通用站点解析）——数据统一落在 DATA/multisite
-        "download_dir": str(paths.data_dir("multisite", "downloads")),
+        # 站点是「一域名一模块」，下载目录各自落在 DATA/sites/<key>/downloads，
+        # 所以这里没有统一的 download_dir。这里只放公共参数。
         # 实测（2026-10）：这批站点直连 ConnectTimeout，走 socks5h 代理 200。
-        # 所以默认开代理；个别站可在此关掉。
         "proxy_enabled": True,
         "pages": 2,
         "timeout": 30,
@@ -123,18 +122,16 @@ class Settings:
         self._migrate()
 
     def _migrate(self) -> None:
-        """把历史版本里写死的旧路径改到新位置。
+        """清理历史版本残留的失效键。
 
-        合并多站点模块时 ``DATA/sites`` 已改名为 ``DATA/multisite``，
-        ``DATA/sites/madouqu`` 独立成 ``DATA/madouqu``；老 settings.json 里
-        残留的路径会让「保存目录」指向一个已经不存在的文件夹，必须纠正。
+        站点改成「一域名一模块」后，下载目录各自落在 ``DATA/sites/<key>``，
+        旧的统一键 ``sites.download_dir``（曾指向 ``DATA/sites|multisite``）
+        如果留着，会让界面显示一个并不使用的目录，必须清掉。
         """
-        legacy = ("/sites/downloads", "\\sites\\downloads")
         cur = str(self._data.get("sites", {}).get("download_dir", ""))
-        if any(x in cur.replace("\\", "/") for x in ("/sites/downloads",)) or \
-                any(x in cur for x in legacy):
-            self._data.setdefault("sites", {})["download_dir"] = str(
-                paths.data_dir("multisite", "downloads"))
+        if cur:
+            # 站点改为各自目录后，旧的统一下载目录键已无意义，清掉避免误导
+            self._data.get("sites", {}).pop("download_dir", None)
         mq = str(self._data.get("madouqu", {}).get("download_dir", ""))
         if "sites/madouqu" in mq.replace("\\", "/") or "sites\\madouqu" in mq:
             self._data.setdefault("madouqu", {})["download_dir"] = str(

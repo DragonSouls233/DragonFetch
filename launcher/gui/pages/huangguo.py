@@ -21,6 +21,7 @@ from ...core.settings import settings
 from ...core.tasks import CENTER, Task
 from ..widgets import Badge, Card, HLine, SearchInput, make_table, open_path
 from .base import Page
+from ..preview import PreviewPane
 
 
 class _QueueBridge(QObject):
@@ -81,6 +82,9 @@ class HuangguoPage(Page):
         self.tabs.addTab(self._tab_sites(), "站点与镜像")
         self.tabs.currentChanged.connect(self._on_tab)
         self.body.addWidget(self.tabs, 1)
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.body.addWidget(self.preview, 0)
 
         self._timer = QTimer(self)
         self._timer.setInterval(900)
@@ -123,6 +127,7 @@ class HuangguoPage(Page):
         ll.addLayout(lh)
         self.table = make_table(["剧名", "集数", "评分", "最近发现"], [300, 60, 60, 120])
         self.table.itemSelectionChanged.connect(self._on_select)
+        self.table.itemSelectionChanged.connect(self._preview_selected)
         ll.addWidget(self.table, 1)
         split.addWidget(left)
 
@@ -581,6 +586,19 @@ class HuangguoPage(Page):
         if row < 0 or row >= len(self._dramas):
             return
         self.load_detail(self._dramas[row])
+
+    def _preview_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._dramas):
+            return
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        d = item.data(Qt.ItemDataRole.UserRole) or {}
+        self.preview.preview(
+            title=d.get("title", "") or "",
+            thumb=d.get("cover") or None,
+        )
 
     def load_detail(self, drama: dict) -> None:
         if not self._ensure():

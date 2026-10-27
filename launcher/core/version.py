@@ -14,7 +14,7 @@ SUPPORT_MODULES = [
     ("tangxin", "糖心 Vlog"),
     ("huangguo", "黄果短剧"),
     ("jiuse", "九色视频"),
-    ("multisite", "多站点（通用站点解析）"),
+    ("sites", "站点 ×12（一域名一模块）"),
     ("madouqu", "麻豆磁力"),
     ("yttiktok", "映取 · YouTube / TikTok"),
 ]

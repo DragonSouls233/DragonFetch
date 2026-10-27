@@ -46,7 +46,7 @@ class HomePage(Page):
             ("tangxin_records", "糖心 · 下载记录"),
             ("tangxin_files", "糖心 · 已下载文件"),
             ("huangguo_dramas", "黄果 · 剧库"),
-            ("sites_count", "多站点 · 站点"),
+            ("sites_count", "站点 · 模块数"),
         ]
         for idx, (key, label) in enumerate(specs):
             card = StatCard(label, "-", "读取中…")
@@ -66,7 +66,8 @@ class HomePage(Page):
             ("糖心 Vlog", "演员云 → 作品库 → 直链下载；导航页用代理读，站点可直连", "tangxin"),
             ("黄果短剧", "剧库浏览 → 选集 → 并发队列下载；镜像域名由发布页刷新", "huangguo"),
             ("九色视频", "地址页取最新入口 → 线路检测 → 直连解析下载（不挂代理）", "jiuse"),
-            ("多站点", "解析直链 / 抓取列表 / 搜索 → 勾选批量下载（12 站）", "sites"),
+            ("站点 · 独立模块", "每个域名一个模块一个页面：解析直链 / 抓取列表 / 搜索（见左侧「站点」）",
+             "site:xvideos"),
             ("麻豆磁力", "独立模块：按关键词抓 BT 磁力，可入库、导出", "madouqu"),
             ("映取 · YT/TikTok", "YouTube / TikTok / 通用站点，基于共享 yt-dlp", "yttiktok"),
             ("导航页 · 黄视频", "daohang.pro 入口表 + 黄视频站点解析下载", "nav"),
@@ -141,7 +142,7 @@ class HomePage(Page):
         else:
             c4.set_value(st.get("count", 0))
             n_js = len(js.get("addresses") or [])
-            c4.set_hint(f"九色线路 {n_js} 条" if n_js else "已注册站点")
+            c4.set_hint(f"九色线路 {n_js} 条" if n_js else "一域名一模块")
 
         self.lbl_env.setText(
             f"yt-dlp {data.get('ytdlp', '-')} · 数据根 {paths.rel(paths.DATA)} · "

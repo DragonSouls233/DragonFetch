@@ -77,6 +77,16 @@ def _selftest() -> int:
             lines.append(f"  backend {name:9s}: FAIL {type(exc).__name__}: {exc}")
 
     try:
+        mods = backend.site_list()
+        lines.append(f"  站点模块  : {len(mods)} 个（"
+                     + "/".join(m["key"] for m in mods[:4]) + " …）")
+        if not mods:
+            ok = False
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        lines.append(f"  站点模块  : FAIL {type(exc).__name__}: {exc}")
+
+    try:
         ver = backend.ytdlp_version()
         lines.append(f"  yt-dlp    : {ver}")
         ok = ok and ver not in ("不可用", "未知", "")

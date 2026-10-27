@@ -4,16 +4,18 @@ from __future__ import annotations
 
 APP_NAME = "DragonFetch"
 APP_TITLE = "DragonFetch · 成人全能下载器"
-APP_VERSION = "0.0.1"
+APP_VERSION = "2.1.0"
 APP_BUILD = "2026.10"
 GITHUB_HINT = "DragonFetch"
 COPYRIGHT = "DragonFetch"
 
-# 各后端支持的站点（用于界面展示，不做功能判断）
+# 各模块的中文名（用于界面展示，不做功能判断）——每个模块都独立
 SUPPORT_MODULES = [
     ("tangxin", "糖心 Vlog"),
     ("huangguo", "黄果短剧"),
-    ("sites", "多站点（JAVDB / Madouqu / 通用）"),
+    ("jiuse", "九色视频"),
+    ("multisite", "多站点（通用站点解析）"),
+    ("madouqu", "麻豆磁力"),
     ("yttiktok", "映取 · YouTube / TikTok"),
 ]
 

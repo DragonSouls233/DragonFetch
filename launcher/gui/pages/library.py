@@ -245,6 +245,11 @@ class LibraryPage(Page):
                 self.table.setItem(r, c, item)
         self._loading = False
         self.table.setColumnWidth(0, 80)
+        # 按内容自适应列宽（上限 240，避免某个长 URL 把整表撑飞）
+        for c in range(1, self.table.columnCount()):
+            self.table.resizeColumnToContents(c)
+            if self.table.columnWidth(c) > 240:
+                self.table.setColumnWidth(c, 240)
         shown = min(self._offset + len(rows), total)
         first = self._offset + 1 if total else 0
         self.lbl_store.setText(

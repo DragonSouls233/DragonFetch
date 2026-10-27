@@ -59,7 +59,8 @@ def prepare() -> None:
         })
 
         for p in (paths.MODULES, paths.MODULES / "huangguo",
-                  paths.MODULES / "multisite", paths.MODULES / "madouqu",
+                  paths.MODULES / "multisite", paths.MODULES / "sites",
+                  paths.MODULES / "madouqu",
                   paths.MODULES / "yttiktok", paths.MODULES / "jiuse"):
             sp = str(p)
             if sp not in sys.path:
@@ -220,13 +221,13 @@ def huangguo_sync_targets() -> list:
 
 # ------------------------------------------------------------------ 多站点
 def multisite() -> SimpleNamespace:
-    """多站点（原 psp 精简版）：只保留通用站点解析，JAVDB / Madouqu 已拆分。"""
+    """多站点**共享解析引擎**（不含任何站点定义：站点在 modules/sites/<key>）。"""
     prepare()
     with _LOCK:
         if "multisite" not in _CACHE:
             _CACHE["multisite"] = SimpleNamespace(
-                registry=_imp("multisite.sites.registry"),
-                service=_imp("multisite.sites.service"),
+                registry=_imp("multisite.engine.registry"),
+                service=_imp("multisite.engine.service"),
             )
     return _CACHE["multisite"]
 
@@ -238,22 +239,39 @@ def site_service():
     return multisite().service.get_site_service(proxy=proxy or None)
 
 
-def site_list() -> list:
-    """给下拉框用的站点列表：``[{"key","label","homepage","ytdlp","native"}]``。
+# ------------------------------------------------------------------ 单站点模块
+def sites_pkg() -> SimpleNamespace:
+    """``modules/sites``：一个域名一个模块的注册表。"""
+    prepare()
+    with _LOCK:
+        if "sites_pkg" not in _CACHE:
+            _CACHE["sites_pkg"] = SimpleNamespace(mod=_imp("sites"))
+    return _CACHE["sites_pkg"]
 
-    剔除 ``native`` 站点（PornHub 归 PornSimilarityPlatform，本项目不展示）。
-    """
-    out = []
-    for spec in multisite().registry.list_sites() or []:
-        if getattr(spec, "native", False):
-            continue
-        out.append({
-            "key": getattr(spec, "key", ""),
-            "label": getattr(spec, "label", ""),
-            "homepage": getattr(spec, "homepage", ""),
-            "ytdlp": bool(getattr(spec, "ytdlp", False)),
-        })
-    return out
+
+def site_modules() -> list:
+    """按界面顺序返回全部站点模块对象（每个都带 label/domains/content/db()）。"""
+    return list(sites_pkg().mod.all())
+
+
+def site_module(key: str):
+    """按 key 取单个站点模块；不存在抛 BackendError（给页面明确报错）。"""
+    mod = sites_pkg().mod.get(key)
+    if mod is None:
+        raise BackendError(f"未知站点模块：{key}")
+    return mod
+
+
+def site_list() -> list:
+    """给侧栏 / 下拉用的站点摘要。"""
+    return [{
+        "key": m.key,
+        "label": m.label,
+        "domain": m.domain,
+        "homepage": m.homepage,
+        "content": m.content,
+        "needs_site_api": bool(m.needs_site_api),
+    } for m in site_modules()]
 
 
 def _norm_date(value) -> str:
@@ -294,7 +312,7 @@ def resolve_meta(url: str, proxy: str | None = None) -> dict:
                       and data.get("categories"))
         if sparse:
             try:
-                from multisite.sites import eaf_adapter
+                from multisite.engine import eaf_adapter
 
                 if eaf_adapter.is_available(spec):
                     extra = asyncio.run(eaf_adapter.fetch_video(
@@ -396,7 +414,8 @@ def ytdlp() -> SimpleNamespace:
 def warm_up() -> list:
     """后台预热：把后端先导入好，避免首次切页时卡 2~4 秒。"""
     done = []
-    for name in ("tangxin", "huangguo", "multisite", "madouqu", "jiuse", "ytdlp"):
+    for name in ("tangxin", "huangguo", "multisite", "sites_pkg", "madouqu",
+                 "jiuse", "ytdlp"):
         try:
             globals()[name]()
             done.append(name)

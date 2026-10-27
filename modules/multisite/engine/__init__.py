@@ -29,6 +29,6 @@ thumbzilla    先用 unofficial-api 解析直链  **无**
 理由同 ``modules.core.net``：``download_manager`` 会被测试以 importlib 单独加载，
 重量级 ``__init__`` 会连带拖入无关依赖。请显式导入子模块::
 
-    from multisite.sites.service import get_site_service
-    from multisite.sites.registry import detect_site
+    from multisite.engine.service import get_site_service
+    from multisite.engine.registry import detect_site
 """

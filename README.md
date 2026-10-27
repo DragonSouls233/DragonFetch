@@ -4,7 +4,7 @@
 >
 > 把分散在多个工程里的下载模块合并成 **一个项目 / 一个进程 / 一个窗口**：
 > 支持多站点链接下载、并发下载池、作品库管理与导航解析，覆盖糖心 Vlog、
-> 黄果短剧、九色视频、多站点（通用站点解析）、麻豆磁力、映取 · YouTube / TikTok。
+> 黄果短剧、九色视频、12 个独立站点模块、麻豆磁力、映取 · YouTube / TikTok。
 > 前端是全新的 PyQt6 应用（`launcher/`），各模块在 `modules/` 下**只保留后端代码**。
 >
 > **每个下载目标是独立模块**（`modules/<name>` + `DATA/<name>` + 独立页面/入口），
@@ -21,9 +21,10 @@ scattered across several projects into **one project / one process / one window*
 
 - **Unified GUI**: a brand-new PyQt6 front-end (`launcher/`), with all modules
   keeping **backend-only** code under `modules/`.
-- **Multi-site downloading**: Tangxin Vlog, Huangguo short drama, Jiuse, generic
-  multi-site parsing, Madouqu magnet search, YT/TikTok, plus navigation parsing.
-  Every target is an **independent module** (`modules/<name>` + `DATA/<name>`).
+- **Multi-site downloading**: Tangxin Vlog, Huangguo short drama, Jiuse, 12
+  per-domain site modules, Madouqu magnet search, YT/TikTok, navigation parsing.
+  Every target is an **independent module** (`modules/<name>` + `DATA/<name>`),
+  and each site is its **own page** — no shared site picker anywhere.
 - **Concurrent download pool** with pause / resume / stop, library management and
   NFO writing, mirror & update detection, and cross-drive sync.
 
@@ -42,7 +43,8 @@ scattered across several projects into **one project / one process / one window*
 | 糖心 Vlog | `PornSimilarityPlatform/tangxin` | `tangxin` | 演员云、作品库（带本地状态）、**并发下载池**（暂停/继续/停止）、下载记录 |
 | 黄果短剧 | `G:\黄果\hg-downloader` | `hgcore` | 剧库、选集、并发队列、**更新检测**、**外盘同步**、下载历史、站点与镜像 |
 | 九色视频 | `dizhi222.pages.dev` 地址页 | `jiuse` | 取最新入口 → 线路检测 → **直连**解析下载、检测/下载记录 |
-| 多站点 | `PornSimilarityPlatform/modules` | `multisite` | **解析直链 / 抓取列表 / 搜索**（8 列可编辑结果表）+ 勾选批量下载 |
+| 站点 ×12（一域名一页） | `PornSimilarityPlatform/modules` | `sites.<key>` | 每站独立页面：**解析直链 / 抓取列表 / 搜索**、8 列可编辑结果表、勾选批量下载 |
+| └ 解析引擎 | 同上 | `multisite.engine` | 只负责页面→直链、列表→条目，本身不知道有哪些站点 |
 | 麻豆磁力 | `PornSimilarityPlatform` 麻豆模块 | `madouqu` | 按关键词抓 BT 磁力、去重入库、导出 CSV |
 | 映取 · YT/TikTok | 本项目 | `yttiktok` | 批量链接、画质档位、仅音频、封面、并发下载 |
 | 导航页 · 黄视频 | 本项目 | — | daohang.pro 入口表、黄视频解析下载 |
@@ -72,13 +74,14 @@ DragonFetch/
 │       ├── theme.py       设计令牌 + 全局 QSS（深/浅色）
 │       ├── widgets.py     卡片、页头、统计卡、提示条、日志面板、表格工具
 │       ├── shell.py       主窗口：侧栏导航 + 页面栈 + 状态栏 + Toast
-│       └── pages/         home / tangxin / huangguo / jiuse / sites /
+│       └── pages/         home / tangxin / huangguo / jiuse / site_page（×12 站点）
 │                          madouqu / yttiktok / navpage / library / settings_page
 ├── modules/            ★ 只有后端代码（无 GUI、无 DATA、无 TEMP）
 │   ├── tangxin/           糖心后端（相对导入，独立包）
 │   ├── huangguo/hgcore/   黄果后端（原 core 改名）
 │   ├── jiuse/             九色后端（direct-only 抓取 + 地址页 + 独立库）
-│   ├── multisite/         多站点后端（原 modules 改名；已剥离 JAVDB / 麻豆）
+│   ├── sites/             ★ 一域名一模块：xvideos/ xnxx/ … thumbzilla/（12 个包）
+│   ├── multisite/         共享解析引擎（engine/：registry + eaf / yt-dlp 适配器）
 │   ├── madouqu/           麻豆后端（独立包：crawler / database / models）
 │   └── yttiktok/          映取后端（ytdlp_service / models）
 └── packaging/          ★ 打包（spec / build.bat / assemble.py / 图标 / 说明）
@@ -92,7 +95,7 @@ DragonFetch/
 - 糖心通过 `TX_DATA / TX_TEMP / TX_BIN / TX_OUTPUT / TX_SETTINGS` 环境变量重定向。
 - 每个模块**独立数据库**（跨进程 + SQLite 单写锁决定，不共享写库）：
   `DATA/tangxin/tangxin.db`、`DATA/huangguo/hg.db`、`DATA/jiuse/jiuse.db`、
-  `DATA/madouqu/{models,videos}.json`。多站点不落库，结果只在页面内（可导出 CSV）。
+  `DATA/sites/<key>/sites.db`（**每个站点一个库**）、`DATA/madouqu/{models,videos}.json`。
 
 ## 运行
 
@@ -138,7 +141,8 @@ python -m launcher.main --selftest      :: 结果也写入 logs/selftest.txt
 |------|------|----------|
 | `tangxin.*` | 不变（相对导入） | `sys.path += modules/` |
 | `core.*`（黄果） | `hgcore.*` | `sys.path += modules/huangguo` |
-| `modules.*`（PSP） | `multisite.*` | `sys.path += modules/multisite` |
+| `modules.*`（PSP） | `multisite.engine.*` | `sys.path += modules/multisite` |
+| —（新增，站点模块） | `sites.<key>.*` | `sys.path += modules/sites` |
 | `core.*`（麻豆） | `madouqu.*` | `sys.path += modules/madouqu` |
 | `core.*`（映取） | `yttiktok.core.*` | `sys.path += modules/` |
 | —（新增） | `jiuse.*` | `sys.path += modules/jiuse` |
@@ -149,12 +153,15 @@ python -m launcher.main --selftest      :: 结果也写入 logs/selftest.txt
 
 - 原 PH 专属页面（快速加模特、已注销归档）随 PORNHUB 后端一并剥离；
   JAVDB 模块已按要求**整块移除**（代码 / 库 / 页面入口都不再存在）。
-- **多站点解析需要代理**：实测（2026-10）直连 `www.xvideos.com` ConnectTimeout，
+- **站点解析需要代理**：实测（2026-10）直连 `www.xvideos.com` ConnectTimeout，
   走 `socks5h://127.0.0.1:10808` 返回 200。`settings.json` 里 `sites.proxy_enabled`
   默认 `true`，个别站可单独关掉。
 - **麻豆域名当前不可用**：实测本机 5 个备用域名（`madouqu.sbs/.club/.cc/.net/.org`）
   经代理 502 / 读超时，直连亦不可达。页面仍保留「检测域名 / 自动找可用域名」，
   拿到新域名后填进「域名」框即可继续使用（模块本身不依赖 yt-dlp）。
+- **站点页面由模块自动生成**：`modules/sites/__init__.py` 的 `ORDER` 决定侧栏顺序；
+  新增站点 = 新建 `modules/sites/<key>/__init__.py`（一个 `SITE`）+ 注册一行，
+  侧栏入口、本站库、库管理条目都会自动出现，不需要改任何别的站点。
 - 糖心并发数可调（同时部数 × 单部分片并发），过高会触发站点限速。
 
 ## 免责声明 / Disclaimer

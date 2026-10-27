@@ -8,6 +8,7 @@
   DATA/tangxin/tangxin.db          SQLite   糖心演员 / 下载记录
   DATA/huangguo/hg.db              SQLite   黄果剧库 / 集 / 下载记录 / 同步清单
   DATA/jiuse/jiuse.db              SQLite   九色线路检测 / 下载记录
+  DATA/sites/<key>/sites.db        SQLite   每个站点一个库（采集 + 下载记录）
   DATA/madouqu/{models,videos}.json           麻豆采集结果
 """
 from __future__ import annotations
@@ -81,6 +82,16 @@ def _json_keys(p: Path, limit: int = 4000) -> List[str]:
     return []
 
 
+def _site_keys() -> List[tuple]:
+    """从后端拿「站点 key → 中文名」（不硬编码，站点增删自动跟随）。"""
+    try:
+        from . import backend  # 延迟导入：避免循环
+
+        return [(s["key"], s["label"]) for s in backend.site_list()]
+    except Exception:
+        return []
+
+
 def stores() -> List[Store]:
     out: List[Store] = []
 
@@ -96,6 +107,12 @@ def stores() -> List[Store]:
     if ji.exists():
         out.append(Store("jiuse", "九色 · 线路/下载", "sqlite", ji,
                          "线路检测历史与下载记录", _sqlite_tables(ji)))
+
+    # 站点：一个域名一个独立库（DATA/sites/<key>/sites.db）
+    for key, label in _site_keys():
+        p = paths.DATA / "sites" / key / "sites.db"
+        out.append(Store(f"site:{key}", f"{label} · 本站库", "sqlite", p,
+                         "本站采集记录与下载记录", _sqlite_tables(p)))
 
     mq_mod = paths.DATA / "madouqu" / "models.json"
     if mq_mod.exists():

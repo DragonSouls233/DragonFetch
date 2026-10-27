@@ -11,8 +11,8 @@ from typing import Callable, Dict
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QPushButton,
-    QSizePolicy, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
 )
 
 from ..core import backend, paths
@@ -23,13 +23,12 @@ from ..core.tasks import CENTER
 from . import theme
 from .widgets import Toast
 
-# key, 图标, 名称, 分组
-NAV_ITEMS = [
+# 基础导航（站点条目在 _build_nav 里按模块动态插入）
+BASE_NAV = [
     ("home", "◎", "总览", "工作台"),
     ("tangxin", "◈", "糖心 Vlog", "媒体库"),
     ("huangguo", "◇", "黄果短剧", "媒体库"),
     ("jiuse", "◉", "九色视频", "媒体库"),
-    ("sites", "⌘", "多站点", "下载器"),
     ("madouqu", "◍", "麻豆磁力", "下载器"),
     ("yttiktok", "▶", "映取 · YT/TikTok", "下载器"),
     ("nav", "✦", "导航页 · 黄视频", "下载器"),
@@ -37,16 +36,44 @@ NAV_ITEMS = [
     ("settings", "⚙", "设置", "系统"),
 ]
 
+SITE_GROUP = "站点"
+
+
+def _site_nav() -> list:
+    """一个域名一个模块，所以侧栏里也是一个域名一个入口（不共用一个页面）。"""
+    try:
+        return [(f"site:{s['key']}", "◦", s["label"], SITE_GROUP)
+                for s in backend.site_list()]
+    except Exception:  # noqa: BLE001 - 后端缺失时界面仍要能开
+        return []
+
+
+def _build_nav() -> list:
+    """在「媒体库」之后插入全部站点入口，其余顺序不变。"""
+    out: list = []
+    for item in BASE_NAV:
+        if item[0] == "madouqu":
+            out.extend(_site_nav())
+        out.append(item)
+    return out
+
+
+NAV_ITEMS = _build_nav()
+
 _FACTORIES: Dict[str, Callable[[], QWidget]] = {}
 
 
 def _factory(key: str) -> Callable[[], QWidget]:
+    if key.startswith("site:"):
+        from .pages.site_page import SitePage
+
+        site_key = key.split(":", 1)[1]
+        return lambda: SitePage(site_key)
     if not _FACTORIES:
         from .pages.home import HomePage
         from .pages.tangxin import TangxinPage
         from .pages.huangguo import HuangguoPage
         from .pages.jiuse import JiusePage
-        from .pages.sites import SitesPage
         from .pages.madouqu import MadouquPage
         from .pages.yttiktok import YtTiktokPage
         from .pages.navpage import NavPage
@@ -54,7 +81,7 @@ def _factory(key: str) -> Callable[[], QWidget]:
         from .pages.settings_page import SettingsPage
         _FACTORIES.update({
             "home": HomePage, "tangxin": TangxinPage, "huangguo": HuangguoPage,
-            "jiuse": JiusePage, "sites": SitesPage, "madouqu": MadouquPage,
+            "jiuse": JiusePage, "madouqu": MadouquPage,
             "yttiktok": YtTiktokPage, "nav": NavPage,
             "library": LibraryPage, "settings": SettingsPage,
         })
@@ -68,23 +95,36 @@ class Sidebar(QWidget):
         super().__init__()
         self.setObjectName("Sidebar")
         self.setFixedWidth(228)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 18, 14, 14)
-        lay.setSpacing(2)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 18, 14, 14)
+        outer.setSpacing(2)
 
         brand = QLabel("DragonFetch")
         brand.setObjectName("BrandTitle")
         sub = QLabel("统一下载工作台")
         sub.setObjectName("BrandSub")
-        lay.addWidget(brand)
-        lay.addWidget(sub)
-        lay.addSpacing(10)
+        outer.addWidget(brand)
+        outer.addWidget(sub)
+        outer.addSpacing(10)
+
+        # 站点是"一域名一入口"，条目会比以前多，必须可滚动，否则小窗口会被截断
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("NavScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        inner.setObjectName("NavInner")
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
 
         self._buttons: Dict[str, QPushButton] = {}
         last_group = None
         for key, icon, label, group in NAV_ITEMS:
             if group != last_group:
-                sec = QLabel(group.upper())
+                sec = QLabel(group.upper() if group != SITE_GROUP else group)
                 sec.setObjectName("NavSection")
                 lay.addWidget(sec)
                 last_group = group
@@ -97,13 +137,16 @@ class Sidebar(QWidget):
             self._buttons[key] = btn
 
         lay.addStretch(1)
+        self._scroll.setWidget(inner)
+        outer.addWidget(self._scroll, 1)
+
         self.lbl_status = QLabel("代理：待检测")
         self.lbl_status.setObjectName("Version")
         self.lbl_status.setWordWrap(True)
-        lay.addWidget(self.lbl_status)
+        outer.addWidget(self.lbl_status)
         ver = QLabel(f"v{APP_VERSION} · DragonFetch")
         ver.setObjectName("Version")
-        lay.addWidget(ver)
+        outer.addWidget(ver)
 
     def _pick(self, key: str) -> None:
         self.set_active(key)
@@ -112,6 +155,9 @@ class Sidebar(QWidget):
     def set_active(self, key: str) -> None:
         for k, btn in self._buttons.items():
             btn.setChecked(k == key)
+        btn = self._buttons.get(key)
+        if btn is not None:
+            self._scroll.ensureWidgetVisible(btn, 0, 40)
 
     def set_status(self, text: str) -> None:
         self.lbl_status.setText(text)

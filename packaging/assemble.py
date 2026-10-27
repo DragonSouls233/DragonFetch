@@ -12,9 +12,9 @@
     TEMP/  logs/
     使用说明.txt
 
-关键点：**不复制 modules 内的联接/数据目录**（modules/huangguo/DATA、
-modules/sites/data 在开发树里是指向根 DATA 的 junction，直接拷贝会把
-几百 MB 运行期数据带进发布包）。
+关键点：**不复制 modules 内的联接/数据目录**（modules/huangguo/DATA
+在开发树里是指向根 DATA 的 junction，直接拷贝会把几百 MB 运行期数据带进
+发布包）。
 """
 from __future__ import annotations
 
@@ -38,12 +38,16 @@ DATA_SKELETON = [
     "DATA/app/backups",
     "DATA/tangxin",
     "DATA/huangguo",
+    "DATA/jiuse",
+    "DATA/multisite",
     "DATA/sites",
-    "DATA/sites/db",
+    "DATA/madouqu",
     "DATA/yttiktok",
     "TEMP/tangxin",
     "TEMP/huangguo",
-    "TEMP/sites",
+    "TEMP/jiuse",
+    "TEMP/multisite",
+    "TEMP/madouqu",
     "TEMP/yttiktok",
     "logs",
 ]
@@ -126,7 +130,7 @@ def _write_readme() -> None:
 
 目录说明
 --------
-modules\\   后端代码（糖心 / 黄果 / 多站点 / 映取）。可直接修改，重启生效。
+modules\\   后端代码（糖心 / 黄果 / 九色 / 多站点 / 麻豆 / 映取）。可直接修改，重启生效。
 bin\\       共享二进制：yt-dlp.exe、ffmpeg.exe、ffprobe.exe、ffplay.exe
 DATA\\      全部运行期数据（数据库、下载、缓存、设置）。**备份这个目录即可。**
 TEMP\\      临时文件，可随时清空。

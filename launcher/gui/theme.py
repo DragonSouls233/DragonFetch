@@ -70,10 +70,12 @@ QWidget {
 QWidget#Root { background: $bg; }
 
 /* ---------------- 侧栏 ---------------- */
-QFrame#Sidebar {
+QWidget#Sidebar {
     background: $bg_alt;
     border-right: 1px solid $border_soft;
 }
+QScrollArea#NavScroll, QWidget#NavInner { background: transparent; border: none; }
+QScrollArea#NavScroll QScrollBar:vertical { width: 6px; margin: 0; }
 QLabel#BrandTitle { font-size: 17px; font-weight: 700; letter-spacing: 0.5px; }
 QLabel#BrandSub { color: $muted; font-size: 11px; }
 QLabel#NavSection {

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 APP_NAME = "DragonFetch"
-APP_TITLE = "DragonFetch · 统一下载工作台"
-APP_VERSION = "2.1.0"
+APP_TITLE = "DragonFetch · 成人全能下载器"
+APP_VERSION = "0.0.1"
 APP_BUILD = "2026.10"
 GITHUB_HINT = "DragonFetch"
 COPYRIGHT = "DragonFetch"

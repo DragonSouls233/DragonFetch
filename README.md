@@ -1,10 +1,34 @@
 # DragonFetch
 
-> 一款 **视频 / 内容下载软件**：把分散在多个工程里的下载模块合并成 **一个项目 / 一个进程 / 一个窗口**，
-> 支持多站点链接下载、并发下载池、作品库管理与导航解析。
+> **一款成人全能下载器（Adult All-in-One Downloader）**
+>
+> 把分散在多个工程里的下载模块合并成 **一个项目 / 一个进程 / 一个窗口**：
+> 支持多站点链接下载、并发下载池、作品库管理与导航解析，覆盖糖心 Vlog、
+> 黄果短剧、多站点（JAVDB / Madouqu / 通用）、映取 · YouTube / TikTok 等。
 > 前端是全新的 PyQt6 应用（`launcher/`），各模块在 `modules/` 下**只保留后端代码**。
 
-当前版本 **v2.1.0**（2026.10 全量重建）。
+当前版本 **V0.01**（2026.10 全量重建）。
+
+---
+
+## English / 英文说明
+
+**DragonFetch** is an adult all-in-one downloader that merges the download modules
+scattered across several projects into **one project / one process / one window**.
+
+- **Unified GUI**: a brand-new PyQt6 front-end (`launcher/`), with all modules
+  keeping **backend-only** code under `modules/`.
+- **Multi-site downloading**: Tangxin Vlog, Huangguo short drama, multi-site
+  (JAVDB / Madouqu / generic), YT/TikTok, plus navigation parsing.
+- **Concurrent download pool** with pause / resume / stop, library management and
+  NFO writing, mirror & update detection, and cross-drive sync.
+
+**Current version:** V0.01 (full rebuild, 2026.10).
+
+**Requirements:** Python 3.11+, PyQt6, and the shared `bin/` binaries
+(yt-dlp / ffmpeg) used by all pages.
+
+---
 
 ## 能力总览
 
@@ -108,17 +132,20 @@ python -m launcher.main --selftest      :: 结果也写入 logs/selftest.txt
 
 由上表的唯一性保证四个后端可**同进程**加载，因此前端才能做成真正的单窗口多页面。
 
-## 已验证（2026-10 重建）
-
-- `compileall` 全绿；8 个页面在离屏与真机下均能实例化，0 异常。
-- 四个后端同进程加载成功；`--selftest` 源码版与打包版均通过。
-- 糖心：科学线路直连，演员云 808 位、1.1 秒；作品库 248 部。
-- 黄果：发布页 → 镜像刷新 → 在线抓取 21 部 → 详情 3 集。
-- 打包：`dist\DragonFetch` 445 MB，exe + `--selftest` 验证通过。
-
 ## 说明 / 已知限制
 
 - 原 PH 专属页面（快速加模特、已注销归档）随 PORNHUB 后端一并剥离，
   由「库管理 → 快速录入 / 备份与清理」提供等价的数据维护能力。
 - JAVDB 采集依赖 `selenium` + `undetected-chromedriver` + 本机 Chrome。
 - 糖心并发数可调（同时部数 × 单部分片并发），过高会触发站点限速。
+
+## 免责声明 / Disclaimer
+
+本软件仅供技术学习与个人收藏研究使用，请勿用于任何侵权或非法用途。
+请在下载前确认您所在地区的法律法规允许，并尊重各站点版权与使用条款。
+使用者因使用本软件产生的任何后果自负。
+
+*This software is for personal learning and research only. Do not use it for any
+infringing or unlawful purpose. Please ensure your local laws permit such use and
+respect the copyright and terms of each site. Users are solely responsible for
+any consequences arising from its use.*

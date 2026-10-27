@@ -1,0 +1,5 @@
+# 糖心 Vlog 下载器依赖（独立部署用）
+# GUI 模式额外需要 PyQt5（桌面端）；服务器无头 CLI 只需下面两项。
+requests>=2.28
+cryptography>=42
+PyQt5>=5.15

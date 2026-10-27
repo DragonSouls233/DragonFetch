@@ -1,0 +1,49 @@
+{
+  "nodes": [
+    {
+      "remarks": "电脑-kr3i1v34",
+      "address": "155.94.145.11",
+      "port": 41062,
+      "id": "b33e4f54-6eaf-41df-89f2-3c0c7a0dd5f9",
+      "flow": "",
+      "network": "tcp",
+      "security": "reality",
+      "sni": "tesla.com",
+      "fingerprint": "chrome",
+      "public_key": "HlogPx-bHuFe0FBflTCHPSQ5ulT4Oy7iewlWFZf_oiM",
+      "short_id": "0c4a3f73124d0d",
+      "spider_x": "/",
+      "alpn": ""
+    },
+    {
+      "remarks": "vpn-自己-h9fbonm9",
+      "address": "23.94.112.121",
+      "port": 25375,
+      "id": "b25bef3b-542f-4440-a889-d60ae7b28d5c",
+      "flow": "",
+      "network": "tcp",
+      "security": "reality",
+      "sni": "www.bing.com",
+      "fingerprint": "chrome",
+      "public_key": "WXyZJ7b-cjjfG016jrPNsWWaa1NQJpq-ynJoGMUqyAQ",
+      "short_id": "b67a26fb",
+      "spider_x": "/",
+      "alpn": ""
+    },
+    {
+      "remarks": "vps2-e058z6c5",
+      "address": "23.94.25.243",
+      "port": 52497,
+      "id": "90d58d8b-9a27-4f12-801d-28a07476f8dc",
+      "flow": "",
+      "network": "tcp",
+      "security": "reality",
+      "sni": "tesla.com",
+      "fingerprint": "chrome",
+      "public_key": "nuZe37Ug4_XvCoK8WUx9iQ_r29KP6hDngT81nEBvgAg",
+      "short_id": "e4",
+      "spider_x": "/",
+      "alpn": ""
+    }
+  ]
+}

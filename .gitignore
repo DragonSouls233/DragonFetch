@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 构建产物
+build/
+dist/
+*.spec
+
+# 运行期数据 / 临时 / 日志（一律不入库）
+DATA/
+TEMP/
+logs/
+downloads/
+
+# 二进制按需自行放置，不入库
+bin/*.exe
+bin/*.dll
+
+# 本地配置与密钥
+.env
+*.local
+*.db
+*.sqlite
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地 AI 工作区记忆
+.workbuddy/

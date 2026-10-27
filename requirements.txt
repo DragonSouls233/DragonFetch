@@ -1,0 +1,14 @@
+# DragonFetch 依赖（前端统一 PyQt6，其余为各后端所需）
+PyQt6>=6.6
+requests>=2.28
+PyYAML>=6.0
+beautifulsoup4>=4.12
+lxml>=5.0
+cryptography>=41.0
+urllib3>=2.0
+
+# 可选：curl_cffi（部分站点 TLS 指纹）、Pillow（封面处理）
+# curl_cffi>=0.6
+# pillow>=10.0
+
+# yt-dlp / ffmpeg 使用项目根 bin/ 下的 exe，无需 pip 安装

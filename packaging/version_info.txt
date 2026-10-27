@@ -1,0 +1,30 @@
+# UTF-8
+# Windows 可执行文件版本资源。改版本号时与 launcher/core/version.py 保持一致。
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2, 1, 0, 0),
+    prodvers=(2, 1, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'080404B0',
+          [StringStruct(u'CompanyName', u'DragonFetch'),
+           StringStruct(u'FileDescription', u'DragonFetch 统一下载工作台'),
+           StringStruct(u'FileVersion', u'2.1.0'),
+           StringStruct(u'InternalName', u'DragonFetch'),
+           StringStruct(u'LegalCopyright', u'DragonFetch'),
+           StringStruct(u'OriginalFilename', u'DragonFetch.exe'),
+           StringStruct(u'ProductName', u'DragonFetch'),
+           StringStruct(u'ProductVersion', u'2.1.0')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)

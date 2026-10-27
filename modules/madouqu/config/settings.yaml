@@ -1,0 +1,28 @@
+# Madouqu模块配置
+
+# 网站配置
+base_url: "https://madouqu.sbs"
+
+# 网络配置
+timeout: 30
+max_retries: 3
+retry_delay: 2
+request_delay: 1.0  # 请求间隔（秒）
+
+# 爬取配置
+max_pages: 10  # 默认最大爬取页数
+fetch_detail: false  # 是否从详情页获取磁力链接
+
+# 代理配置
+proxy:
+  enabled: false
+  url: ""  # 例如: "http://127.0.0.1:7890"
+
+# 数据库配置
+database:
+  dir: "modules/madouqu/data"
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "modules/madouqu/logs/madouqu.log"

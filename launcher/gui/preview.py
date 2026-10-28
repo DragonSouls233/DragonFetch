@@ -82,7 +82,12 @@ class PreviewPane(QFrame):
         head.addWidget(self.btn_toggle)
         root.addLayout(head)
 
-        self._body = QHBoxLayout()
+        # ⚠️ 折叠必须作用于 QWidget 而不是 QLayout：QLayout 没有 isVisible()/
+        # setVisible()，对布局调用会抛 AttributeError；而 Qt 会把槽函数里的
+        # Python 异常当致命错误直接 abort 整个进程（用户表现为"点一下就闪退"）。
+        self._body_widget = QWidget(self)
+        self._body = QHBoxLayout(self._body_widget)
+        self._body.setContentsMargins(0, 0, 0, 0)
         self._body.setSpacing(12)
         self.lbl_thumb = QLabel()
         self.lbl_thumb.setObjectName("PreviewThumb")
@@ -110,7 +115,7 @@ class PreviewPane(QFrame):
             note.setWordWrap(True)
             self._player_host = note
         self._body.addWidget(self._player_host, 1)
-        root.addLayout(self._body, 1)
+        root.addWidget(self._body_widget, 1)
 
     # ----------------------------------------------------------- 公共入口
     def preview(self, title: str = "", thumb: str | None = None,
@@ -186,9 +191,9 @@ class PreviewPane(QFrame):
             QDesktopServices.openUrl(QUrl(src))
 
     def _toggle(self) -> None:
-        hidden = self._body.isVisible()
-        self._body.setVisible(not hidden)
-        self.btn_toggle.setText("展开" if hidden else "收起")
+        was_visible = self._body_widget.isVisible()
+        self._body_widget.setVisible(not was_visible)
+        self.btn_toggle.setText("展开" if was_visible else "收起")
 
     # ----------------------------------------------------------- 播放器回调
     def _on_player_error(self, _err, _msg: str = "") -> None:

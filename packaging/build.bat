@@ -1,96 +1,172 @@
 @echo off
-chcp 65001 >nul
 setlocal enabledelayedexpansion
 cd /d "%~dp0.."
 
+rem ============================================================
+rem  DragonFetch ´ò°ü½Å±¾£¨PyInstaller onedir£©
+rem
+rem   ´ò°ü.bat                     ÍêÕû´ò°ü£¬²úÎïÔÚ dist\DragonFetch
+rem   ´ò°ü.bat --no-bin            ²»¸´ÖÆ bin£¨yt-dlp / ffmpeg ²»½ø°ü£©
+rem   ´ò°ü.bat --skip-build        Ö»ÖØĞÂ×é×° modules / bin / DATA
+rem   ´ò°ü.bat --distpath Ä¿Â¼Ãû   Ö¸¶¨²úÎïÄ¿Â¼£¬Ä¬ÈÏ dist
+rem
+rem  ×¢Òâ£º±¾ÎÄ¼ş±ØĞë±£´æÎª GBK ±àÂë + CRLF »»ĞĞ¡£
+rem ============================================================
+
+set "NOBIN="
+set "SKIPBUILD="
+set "DISTPATH=dist"
+
+:parse
+if "%~1"=="" goto :parsed
+if /i "%~1"=="--no-bin" (
+    set "NOBIN=1"
+    shift
+    goto :parse
+)
+if /i "%~1"=="--skip-build" (
+    set "SKIPBUILD=1"
+    shift
+    goto :parse
+)
+if /i "%~1"=="--distpath" (
+    if "%~2"=="" (
+        echo [x] --distpath ºóÃæÈ±ÉÙÄ¿Â¼Ãû
+        pause
+        exit /b 1
+    )
+    set "DISTPATH=%~2"
+    shift
+    shift
+    goto :parse
+)
+echo [!] ºöÂÔÎ´Öª²ÎÊı£º%~1
+shift
+goto :parse
+
+:parsed
+
 echo ============================================
-echo   DragonFetch æ‰“åŒ…è„šæœ¬ï¼ˆonedirï¼‰
+echo   DragonFetch ´ò°ü£¨onedir£©
 echo ============================================
 echo.
 
-rem ---------- 1. é€‰æ‹©è§£é‡Šå™¨ ----------
-set "PY=%DRAGONFETCH_PYTHON%"
-if not defined PY if exist "C:\Python314\python.exe" set "PY=C:\Python314\python.exe"
-if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
-if not defined PY (
-    where python >nul 2>nul
-    if not errorlevel 1 set "PY=python"
-)
-if not defined PY (
-    echo [x] æœªæ‰¾åˆ° Pythonã€‚è¯·å®‰è£… Python 3.11+ æˆ–è®¾ç½® DRAGONFETCH_PYTHON æŒ‡å‘ python.exe
+rem ---------- 1. Ä¿Â¼¼ì²é ----------
+if not exist "launcher\main.py" (
+    echo [x] µ±Ç°Ä¿Â¼ÏÂÃ»ÓĞ launcher\main.py£¬ÇëÔÚÏîÄ¿¸ùÄ¿Â¼ÔËĞĞ¡£
     pause
     exit /b 1
 )
-echo [i] ä½¿ç”¨è§£é‡Šå™¨ï¼š%PY%
-"%PY%" --version
+if not exist "modules\__init__.py" (
+    echo [x] µ±Ç°Ä¿Â¼ÏÂÃ»ÓĞ modules£¨ºó¶Ë´úÂë£©¡£
+    pause
+    exit /b 1
+)
 
-rem ---------- 2. ä¾èµ– ----------
-"%PY%" -c "import PyQt6" >nul 2>nul
+rem ---------- 2. ½âÊÍÆ÷ ----------
+call "scripts\_find_python.bat"
 if errorlevel 1 (
-    echo [i] å®‰è£… PyQt6 ç­‰è¿è¡Œä¾èµ–...
-    "%PY%" -m pip install -r requirements.txt
+    echo.
+    pause
+    exit /b 1
+)
+echo [i] Python: %PY% %PYOPT%
+"%PY%" %PYOPT% --version
+
+rem ---------- 3. ÒÀÀµ ----------
+"%PY%" %PYOPT% -c "import PyQt6" >nul 2>nul
+if errorlevel 1 (
+    echo [i] °²×°ÔËĞĞÒÀÀµ requirements.txt ...
+    "%PY%" %PYOPT% -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [x] ä¾èµ–å®‰è£…å¤±è´¥
+        echo [x] ÔËĞĞÒÀÀµ°²×°Ê§°Ü
         pause
         exit /b 1
     )
 )
 
-"%PY%" -c "import PyInstaller" >nul 2>nul
+"%PY%" %PYOPT% -c "import PyInstaller" >nul 2>nul
 if errorlevel 1 (
-    echo [i] å®‰è£… PyInstaller...
-    "%PY%" -m pip install "pyinstaller>=6.10"
+    echo [i] °²×° PyInstaller ...
+    "%PY%" %PYOPT% -m pip install "pyinstaller>=6.10"
     if errorlevel 1 (
-        echo [x] PyInstaller å®‰è£…å¤±è´¥
+        echo [x] PyInstaller °²×°Ê§°Ü
         pause
         exit /b 1
     )
 )
 
-rem ---------- 3. å›¾æ ‡ ----------
+rem ---------- 4. Í¼±ê ----------
 if not exist "assets\icon.ico" (
-    echo [i] ç”Ÿæˆå›¾æ ‡...
-    "%PY%" packaging\make_icon.py
+    echo [i] Éú³ÉÍ¼±ê assets\icon.ico ...
+    "%PY%" %PYOPT% packaging\make_icon.py
 )
-
-rem ---------- 4. æ¸…ç†æ—§äº§ç‰© ----------
-echo [i] æ¸…ç† build\ dist\ ...
-if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
 
 rem ---------- 5. PyInstaller ----------
+if defined SKIPBUILD goto :assemble
+
+echo [i] ÇåÀí¾ÉµÄ build Óë %DISTPATH% ...
+if exist build rmdir /s /q build
+if exist "%DISTPATH%" rmdir /s /q "%DISTPATH%"
+
 echo.
-echo [1/2] PyInstaller æ‰“åŒ…ä¸­ï¼ˆé¦–æ¬¡çº¦ 1-3 åˆ†é’Ÿï¼‰...
-"%PY%" -m PyInstaller packaging\DragonFetch.spec --noconfirm --clean --distpath dist --workpath build
+echo [1/3] PyInstaller ´ò°üÖĞ£¨Ê×´ÎÔ¼ 1-3 ·ÖÖÓ£©...
+"%PY%" %PYOPT% -m PyInstaller packaging\DragonFetch.spec --noconfirm --clean --distpath "%DISTPATH%" --workpath build
 if errorlevel 1 (
-    echo [x] PyInstaller å¤±è´¥ï¼Œè¯·çœ‹ä¸Šé¢çš„æŠ¥é”™
+    echo [x] PyInstaller Ê§°Ü£¬Çë¿´ÉÏÃæµÄ±¨´í
     pause
     exit /b 1
 )
-if not exist "dist\DragonFetch\DragonFetch.exe" (
-    echo [x] æ²¡æœ‰ç”Ÿæˆ dist\DragonFetch\DragonFetch.exe
+if not exist "%DISTPATH%\DragonFetch\DragonFetch.exe" (
+    echo [x] Ã»ÓĞÉú³É %DISTPATH%\DragonFetch\DragonFetch.exe
     pause
     exit /b 1
 )
 
-rem ---------- 6. ç»„è£…è¿è¡ŒæœŸæ–‡ä»¶ ----------
+:assemble
+rem ---------- 6. ×é×°ÔËĞĞÆÚÎÄ¼ş ----------
 echo.
-echo [2/2] å¤åˆ¶ modules / bin / DATA éª¨æ¶...
-"%PY%" packaging\assemble.py
+echo [2/3] ¸´ÖÆ modules / bin / DATA ¹Ç¼Ü...
+set "ASMOPT=--dist %DISTPATH%\DragonFetch"
+if defined NOBIN set "ASMOPT=%ASMOPT% --no-bin"
+"%PY%" %PYOPT% packaging\assemble.py %ASMOPT%
 if errorlevel 1 (
-    echo [x] ç»„è£…å¤±è´¥
+    echo [x] ×é×°Ê§°Ü
     pause
     exit /b 1
 )
 
+rem ---------- 7. ²úÎï×Ô¼ì ----------
+echo.
+echo [3/3] ÔËĞĞ²úÎï×Ô¼ì...
+set "STLOG=%DISTPATH%\DragonFetch\logs\selftest.txt"
+if exist "%STLOG%" del /q "%STLOG%"
+pushd "%DISTPATH%\DragonFetch"
+DragonFetch.exe --selftest
+set "STRC=%ERRORLEVEL%"
+popd
+if exist "%STLOG%" (
+    "%PY%" %PYOPT% -c "import pathlib,sys; p=pathlib.Path(sys.argv[1]); sys.stdout.write(p.read_text(encoding='utf-8'))" "%STLOG%"
+) else (
+    echo [!] Ã»ÓĞÉú³É×Ô¼ì±¨¸æ£º%STLOG%
+)
+if not "%STRC%"=="0" (
+    echo.
+    echo [x] ²úÎï×Ô¼ìÎ´Í¨¹ı£¨ÍË³öÂë %STRC%£©
+    pause
+    exit /b %STRC%
+)
+
 echo.
 echo ============================================
-echo   å®Œæˆï¼š dist\DragonFetch\DragonFetch.exe
-echo   å¯åˆ†å‘çš„æ•´ä¸ªæ–‡ä»¶å¤¹æ˜¯ï¼š dist\DragonFetch
+echo   Íê³É£º %DISTPATH%\DragonFetch\DragonFetch.exe
+echo   ¿É·Ö·¢µÄÕû¸öÎÄ¼ş¼ĞÊÇ£º %DISTPATH%\DragonFetch
 echo ============================================
 echo.
-choice /c YN /n /m "ç°åœ¨è¯•å¯åŠ¨ä¸€æ¬¡ï¼Ÿ(Y/N) "
+choice /c YN /t 20 /d N /m "ÏÖÔÚÊÔÆô¶¯Ò»´Î£¿(Y/N£¬20 ÃëºóÄ¬ÈÏ N)"
 if errorlevel 2 goto :done
-start "" "dist\DragonFetch\DragonFetch.exe"
+start "" "%DISTPATH%\DragonFetch\DragonFetch.exe"
+
 :done
 endlocal
+exit /b 0

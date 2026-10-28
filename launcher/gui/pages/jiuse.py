@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from ...core import backend, paths
 from ...core.settings import settings
 from ...core.tasks import CENTER, Task
+from ..preview import PreviewPane
 from ..widgets import Badge, Card, HLine, make_table, open_path
 from .base import Page
 
@@ -30,11 +31,12 @@ class _DlWorker(QThread):
     row_state = pyqtSignal(int, str, int)
     finished_all = pyqtSignal(int, int)
 
-    def __init__(self, items, out_dir: str, referer: str):
+    def __init__(self, items, out_dir: str, referer: str, proxy: str = ""):
         super().__init__()
         self._items = list(items)
         self._out = out_dir
         self._referer = referer
+        self._proxy = (proxy or "").strip()
         self._stop = threading.Event()
 
     def run(self) -> None:  # noqa: D401
@@ -61,7 +63,8 @@ class _DlWorker(QThread):
                 self.row_state.emit(_i, str(line)[:40], int(max(0, min(100, pct))))
 
             try:
-                path = svc.download(url, self._out, progress=_prog)
+                path = svc.download(url, self._out, progress=_prog,
+                                    proxy=self._proxy or None)
                 size = 0
                 try:
                     size = os.path.getsize(path) if path else 0
@@ -110,6 +113,10 @@ class JiusePage(Page):
         self.tabs.currentChanged.connect(
             lambda i: self.reload_records() if i == 1 else None)
         self.body.addWidget(self.tabs, 1)
+
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.body.addWidget(self.preview, 0)
 
     # ---------------------------------------------------------------- 主标签
     def _tab_main(self) -> QWidget:
@@ -225,6 +232,7 @@ class JiusePage(Page):
 
         self.table = make_table(["选择", "标题", "地址"], [50, 420, 560])
         self.table.itemChanged.connect(self._update_pick)
+        self.table.itemSelectionChanged.connect(self._preview_selected)
         self.table.setMinimumHeight(220)
         gl.addWidget(self.table, 1)
         lay.addWidget(grab, 1)
@@ -348,15 +356,20 @@ class JiusePage(Page):
         s.set("jiuse.nav_url", nav_url)
         s.set("jiuse.check_limit", int(self.sp_limit.value()))
         s.save()
+        # 地址页常在墙外：允许时用代理读（站点本身仍按直连校验结果决定）
+        nav_proxy = ""
+        if s.get("navsync.use_proxy_for_nav", True) and s.get("proxy.enabled", True):
+            nav_proxy = s.proxy_url
 
         self.btn_refresh.setEnabled(False)
         self.badge_state.set_tone("warn")
         self.badge_state.setText("读取中…")
-        self.lbl_route.setText("正在直连地址页…")
+        self.lbl_route.setText("正在读取地址页…")
 
         task = Task(self._ns.nav.refresh, nav_url,
                     float(s.get("jiuse.timeout", 8) or 8),
-                    int(self.sp_limit.value()), want_progress=True)
+                    int(self.sp_limit.value()), want_progress=True,
+                    proxy=nav_proxy, allow_proxy_fallback=bool(nav_proxy))
         task.progress.connect(
             lambda p, t: self.lbl_route.setText(t or "读取中…"))
         task.done.connect(self._refresh_done)
@@ -469,6 +482,16 @@ class JiusePage(Page):
                     + ("" if items else "（站点结构可能变了，可试详情页 URL）"),
                     "ok" if items else "warn")
 
+    def _preview_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._items):
+            return
+        it = self._items[row]
+        self.preview.preview(
+            title=it.get("title", "") or it.get("url", "") or "",
+            thumb=it.get("cover") or None,
+        )
+
     def _toggle_all(self, state: int) -> None:
         on = bool(state)
         self.table.blockSignals(True)
@@ -520,7 +543,9 @@ class JiusePage(Page):
             bar.setRange(0, 100)
             self.table_q.setCellWidget(r, 2, bar)
 
-        self._worker = _DlWorker(picked, out, self._current_addr())
+        proxy = (settings().proxy_url
+                 if settings().get("jiuse.proxy_enabled", False) else "")
+        self._worker = _DlWorker(picked, out, self._current_addr(), proxy=proxy)
         self._worker.row_state.connect(self._row_state)
         self._worker.finished_all.connect(self._dl_done)
         self.btn_stop.setEnabled(True)

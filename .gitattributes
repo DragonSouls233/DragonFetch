@@ -1,0 +1,7 @@
+# Windows 批处理必须是 CRLF：LF 换行 cmd 会解析错乱（双击直接报
+# “'xxx' 不是内部或外部命令”）。这里强制统一，避免再次被改坏。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 打包配置与脚本按原样存放
+packaging/*.spec text eol=crlf

@@ -20,6 +20,11 @@ _ANCHOR_RE = re.compile(
     r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
 _IMG_RE = re.compile(r'<img[^>]+(?:alt|title)=["\']([^"\']{2,80})["\']', re.I)
 
+# 封面：懒加载站常把真实地址放在 data-src / data-original，src 多为占位图
+_IMG_DATA_SRC_RE = re.compile(
+    r'<img[^>]+?(?:data-src|data-original|data-lazy-src)=["\']([^"\']+)["\']', re.I)
+_IMG_SRC_RE = re.compile(r'<img[^>]+?src=["\']([^"\']+)["\']', re.I)
+
 _VIDEO_HINTS = ("/v/", "/video", "view_video", "voddetail", "vodplay",
                 "/archives/", "/post/", "/watch")
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
@@ -60,10 +65,23 @@ def parse_list(html: str, base_url: str) -> List[dict]:
             continue
         seen.add(url)
         text = re.sub(r"\s+", " ", _TAG_RE.sub("", m.group(2) or "")).strip()
-        block_end = min(len(html), m.end() + 400)
-        img = _IMG_RE.search(html[m.start():block_end])
+        inner = m.group(2) or ""
+        # 只在当前 <a> 内部、以及其后一小段（不越过下一个 <a>）里找图，
+        # 否则会把相邻条目的图串到本条目上。
+        nxt = html.find("<a", m.end())
+        win_end = min(m.end() + 400, nxt if nxt != -1 else len(html))
+        block = html[m.start():win_end]
+        img = _IMG_RE.search(inner) or _IMG_RE.search(block)
         title = text or (img.group(1) if img else "") or url.rstrip("/").split("/")[-1]
-        out.append({"title": title[:120], "url": url})
+        # 封面优先取懒加载属性，再退回 src；排除 data: 内联图与 .svg 占位
+        cover = ""
+        m_img = (_IMG_DATA_SRC_RE.search(inner) or _IMG_SRC_RE.search(inner)
+                 or _IMG_DATA_SRC_RE.search(block) or _IMG_SRC_RE.search(block))
+        if m_img:
+            cand = (m_img.group(1) or "").strip()
+            if cand and not cand.startswith("data:") and not cand.lower().endswith(".svg"):
+                cover = _abs(base_url, cand)
+        out.append({"title": title[:120], "url": url, "cover": cover})
     return out
 
 

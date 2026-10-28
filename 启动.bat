@@ -1,36 +1,61 @@
 @echo off
-chcp 65001 >nul
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-rem ---------- é€‰æ‹©è§£é‡Šå™¨ï¼šä¼˜å…ˆè£…äº† PyQt6 çš„é‚£ä¸ª ----------
-set "PY=%DRAGONFETCH_PYTHON%"
-if not defined PY if exist "C:\Python314\python.exe" set "PY=C:\Python314\python.exe"
-if not defined PY (
-    where python >nul 2>nul
-    if not errorlevel 1 set "PY=python"
+rem ============================================================
+rem  DragonFetch Ô´ÂëÆô¶¯Æ÷
+rem   Æô¶¯.bat              Õı³£Æô¶¯½çÃæ
+rem   Æô¶¯.bat --selftest   ÎŞ½çÃæ×Ô¼ì£¨ÅÅ´íÓÃ£¬½á¹ûĞ´Èë logs ÏÂµÄ selftest.txt£©
+rem   Æô¶¯.bat --version    ´òÓ¡°æ±¾ºÅ
+rem
+rem  ×¢Òâ£º±¾ÎÄ¼ş±ØĞë±£´æÎª GBK ±àÂë + CRLF »»ĞĞ¡£
+rem ============================================================
+
+if not exist "launcher\main.py" (
+    echo [x] µ±Ç°Ä¿Â¼ÏÂÃ»ÓĞ launcher\main.py
+    echo     ÇëÔÚ DragonFetch ¸ùÄ¿Â¼ÔËĞĞ±¾½Å±¾¡£
+    pause
+    exit /b 1
 )
-if not defined PY (
-    echo [DragonFetch] æœªæ‰¾åˆ° Pythonï¼Œè¯·å®‰è£… Python 3.11+ åé‡è¯•ã€‚
+if not exist "modules\__init__.py" (
+    echo [x] µ±Ç°Ä¿Â¼ÏÂÃ»ÓĞ modules£¨ºó¶Ë´úÂë£©
+    echo     ÇëÔÚ DragonFetch ¸ùÄ¿Â¼ÔËĞĞ±¾½Å±¾¡£
     pause
     exit /b 1
 )
 
-"%PY%" -c "import PyQt6" >nul 2>nul
+call "%~dp0scripts\_find_python.bat"
 if errorlevel 1 (
-    echo [DragonFetch] å½“å‰è§£é‡Šå™¨ç¼ºå°‘ PyQt6ï¼Œæ­£åœ¨å®‰è£…...
-    "%PY%" -m pip install -r requirements.txt
+    echo.
+    pause
+    exit /b 1
+)
+
+echo [i] Python: %PY% %PYOPT%
+"%PY%" %PYOPT% --version
+
+"%PY%" %PYOPT% -c "import PyQt6" >nul 2>nul
+if errorlevel 1 (
+    echo [i] Ê×´ÎÔËĞĞ£ºÕıÔÚ°²×°ÒÀÀµ£¨Ô¼ 1-3 ·ÖÖÓ£¬Ö»´ËÒ»´Î£©...
+    "%PY%" %PYOPT% -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [DragonFetch] ä¾èµ–å®‰è£…å¤±è´¥ï¼Œè¯·æ‰‹åŠ¨æ‰§è¡Œï¼š "%PY%" -m pip install -r requirements.txt
+        echo [x] ÒÀÀµ°²×°Ê§°Ü¡£ÇëÊÖ¶¯Ö´ĞĞ£º
+        echo     "%PY%" %PYOPT% -m pip install -r requirements.txt
         pause
         exit /b 1
     )
 )
 
-"%PY%" -m launcher.main
-if errorlevel 1 (
+"%PY%" %PYOPT% -m launcher.main %*
+set "RC=%ERRORLEVEL%"
+
+if not "%RC%"=="0" (
     echo.
-    echo [DragonFetch] å¯åŠ¨å¤±è´¥ï¼Œè¯·æŸ¥çœ‹ä¸Šé¢è¾“å‡ºæˆ– logs\launcher-*.log
+    echo [x] Æô¶¯Ê§°Ü£¨ÍË³öÂë %RC%£©
+    echo     ÔËĞĞÈÕÖ¾£ºlogs Ä¿Â¼ÏÂµÄ launcher-*.log
+    echo     ½çÃæÒì³££ºlogs Ä¿Â¼ÏÂµÄ ui-error.log
+    echo     ÎŞ½çÃæ×Ô¼ì£ºÆô¶¯.bat --selftest
     pause
 )
-endlocal
+
+endlocal & exit /b %RC%

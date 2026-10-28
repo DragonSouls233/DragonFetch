@@ -1,21 +1,30 @@
 # -*- coding: utf-8 -*-
 """九色（91PORNY）地址页解析与线路管理。
 
-地址页：``https://dizhi222.pages.dev/`` —— 一个静态页，正文就是若干条
-``<a href="https://www.91tanhua###.sbs">`` 形式的「最新地址」。
+地址页：``https://dizhi222.pages.dev/``。它的正文现在是**空的**：
+
+    <div id="main"></div>
+    <script src="https://lib.kingslord.com/dizhi/publish.js?20221020"></script>
+
+真正的线路清单被写进那个外链 JS（一行混淆脚本，字符串数组里塞着
+``91tanhua301.sbs`` … ``91tanhua350.sbs``、``jiuse.icu``、``91porny.com``）。
+所以解析要两段：先抽 HTML 里的 ``<a>``，抽不到再顺着 ``<script src>`` 去读 JS
+（实测 2026-10：HTML 里 0 条，JS 里 50 条 91tanhua + jiuse.icu）。
 
 流程：
-  1. 直连抓地址页（不代理），正则/BeautifulSoup 双通道抽链接；
-  2. 过滤出真正的站点域名（91tanhua 系 / 同源短域名），去重；
-  3. 逐条轻量探测（HTTP + 标题校验），按可用性 + 延迟排序；
-  4. 结果写 ``DATA/jiuse/state.json``，并在 SQLite 记一条检测历史。
-  5. 全部失败时**回退上次缓存**，界面照常可用（只是标记「缓存」）。
+  1. 抓地址页（默认直连，失败且允许时用代理兜底）；
+  2. HTML 抽链接；为空则读页面引用 JS，正则抽「站点域名」；
+  3. 逐条轻量探测（HTTP + 站点指纹校验），按可用性 + 延迟排序；
+  4. 结果写 ``DATA/jiuse/state.json``，并在 SQLite 记一条检测历史；
+  5. 全部失败时**回退上次缓存**，界面照常可用（只是标记「缓存」）；
+  6. 每条线路记 ``direct`` 标记：true = 本机直连能开（不用代理下载）。
 """
 from __future__ import annotations
 
 import json
 import re
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Dict, List
 
@@ -28,11 +37,19 @@ SITE_MARKERS = ("九色", "91porny", "91porney", "91tanhua", "91自拍", "91视�
 
 _URL_RE = re.compile(r'https?://[^\s"\'<>)]+', re.I)
 _HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
+_SCRIPT_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
+
+# 站点域名特征：地址页 JS 里出现的字符串数组，只认这几类才算「线路」
+SITE_HOST_HINTS = ("91tanhua", "jiuse.", "91porny", "91porney")
+_HOST_RE = re.compile(r"(?:https?://)?(?:www\.)?((?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,6})", re.I)
 
 # 明显不是「线路」的链接
 _SKIP_HOSTS = ("pages.dev", "github.io", "t.me", "telegram", "twitter.com",
-               "x.com", "mailto", "javascript:", "google", "cloudflare")
+               "x.com", "mailto", "javascript:", "google", "cloudflare",
+               "kingslord", "alibaba", "googletagmanager", "jsdelivr",
+               "dizhi9", "gstatic", "w3.org")
+
 
 
 def _data_dir() -> Path:
@@ -106,64 +123,193 @@ def parse_addresses(html: str) -> List[Dict[str, str]]:
     return cands
 
 
+def asset_urls(html: str, base_url: str = "") -> List[str]:
+    """页面引用的外部 JS（地址页把线路清单放在外链脚本里）。"""
+    out: List[str] = []
+    for src in _SCRIPT_RE.findall(html or ""):
+        src = (src or "").strip()
+        if not src:
+            continue
+        if src.startswith("//"):
+            src = "https:" + src
+        elif not src.lower().startswith("http"):
+            src = urllib.parse.urljoin(base_url or NAV_URL, src)
+        if src not in out:
+            out.append(src)
+    return out
+
+
+def parse_domains(text: str) -> List[Dict[str, str]]:
+    """从 JS/纯文本里抽「站点域名」候选（``jiuse.icu`` 排在 91tanhua 系前面）。
+
+    JS 是混淆过的，但域名是以明文字符串存在数组里的，所以直接正则抓
+    ``xxx.yyy`` 再按 ``SITE_HOST_HINTS`` 过滤即可，不需要执行 JS。
+    """
+    cands: List[Dict[str, str]] = []
+    seen = set()
+    for host in _HOST_RE.findall(text or ""):
+        h = host.lower().strip(".")
+        if not any(k in h for k in SITE_HOST_HINTS):
+            continue
+        if any(s in h for s in _SKIP_HOSTS):
+            continue
+        if h in seen:
+            continue
+        seen.add(h)
+        cands.append({"url": "https://" + h, "host": h, "label": h})
+    # 主站（jiuse.icu / 91porny.com）比 91tanhua 系更稳，排前面
+    cands.sort(key=lambda c: (1 if "91tanhua" in c["host"] else 0))
+    return cands
+
+
 def _looks_like_site(html: str) -> bool:
     low = (html or "").lower()
     return any(m.lower() in low for m in SITE_MARKERS) or "<video" in low
 
 
-def check_one(url: str, timeout: float = 8.0) -> dict:
-    """探测单条线路并校验站点指纹。"""
-    res = client.check(url, timeout=timeout)
-    if not res.get("ok"):
-        return res
+def check_one(url: str, timeout: float = 8.0, proxy: str = "") -> dict:
+    """探测单条线路并校验站点指纹。``direct`` 标记是否走的直连。
+
+    只发**一次**请求就够：``client.fetch`` 内部已经做了多通道兜底，
+    再单独 ``check`` + ``fetch`` 会让每条线路白跑两遍。
+    """
+    import time
+
+    t0 = time.time()
     try:
-        html, via = client.fetch(url, timeout=timeout)
-        res["match"] = _looks_like_site(html)
-        res["via"] = via
-        res["size"] = len(html)
-        if not res["match"]:
-            res["ok"] = False
-            res["error"] = "页面可访问，但没识别到九色站点特征"
+        html, via = client.fetch(url, timeout=timeout, proxy=proxy or None)
     except Exception as exc:  # noqa: BLE001
-        res["match"] = False
-        res["error"] = str(exc)[:160]
-    return res
+        return {"url": url, "ok": False, "http": 0,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "via": "", "size": 0, "match": False, "direct": not proxy,
+                "error": str(exc)[:200]}
+    ok = _looks_like_site(html)
+    return {"url": url, "ok": ok, "http": 200,
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "via": via, "size": len(html), "match": ok, "direct": not proxy,
+            "error": "" if ok else "页面可访问，但没识别到九色站点特征"}
+
+
+def _probe_many(cands: List[Dict[str, str]], timeout: float, proxy: str,
+                workers: int = 4) -> List[dict]:
+    """并行探测一批候选（顺序按候选表返回），避免串行超时叠加。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    items = cands or []
+    if not items:
+        return []
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as ex:
+        futs = [ex.submit(check_one, c["url"], timeout, proxy) for c in items]
+        out = []
+        for c, f in zip(items, futs):
+            try:
+                r = f.result()
+            except Exception as exc:  # noqa: BLE001
+                r = {"url": c["url"], "ok": False, "elapsed_ms": 0,
+                     "error": str(exc)[:120], "direct": not proxy}
+            r.update({"host": c["host"], "label": c["label"]})
+            out.append(r)
+        return out
+
+
+def fetch_nav_html(nav_url: str, timeout: float = 12.0,
+                   proxy: str = "", allow_proxy_fallback: bool = False,
+                   prefer_proxy: bool = False):
+    """抓地址页：默认先直连；``prefer_proxy`` 或直连失败时用代理。
+
+    返回 ``(html, via, used_proxy)``。``prefer_proxy`` 用于「上次就知道这个
+    地址页直连不通」的情况，省掉一次白等的直连超时。
+    """
+    if prefer_proxy and proxy and allow_proxy_fallback:
+        html, via = client.fetch(nav_url, timeout=timeout, proxy=proxy)
+        return html, via, True
+    try:
+        html, via = client.fetch(nav_url, timeout=timeout)
+        return html, via, False
+    except Exception as first:  # noqa: BLE001
+        if not (allow_proxy_fallback and proxy):
+            raise
+        html, via = client.fetch(nav_url, timeout=timeout, proxy=proxy)
+        return html, f"{via}（直连失败：{type(first).__name__}）", True
 
 
 def refresh(nav_url: str = "", timeout: float = 8.0,
-            max_check: int = 8, progress=None) -> dict:
-    """抓地址页 → 抽候选 → 逐条探测 → 排序 → 落盘/入库。"""
+            max_check: int = 8, progress=None,
+            proxy: str = "", allow_proxy_fallback: bool = False,
+            prefer_proxy: bool = False) -> dict:
+    """抓地址页 → 抽候选 → 并行探测 → 排序 → 落盘/入库。"""
     nav_url = (nav_url or NAV_URL).strip()
     say = progress or (lambda *a, **k: None)
 
     say(0, 0, f"读取地址页 {nav_url}")
     try:
-        html, via = client.fetch(nav_url, timeout=max(timeout, 12))
+        html, via, nav_via_proxy = fetch_nav_html(
+            nav_url, max(timeout, 10), proxy, allow_proxy_fallback, prefer_proxy)
     except Exception as exc:  # noqa: BLE001
         prev = _load_state()
         prev["error"] = f"地址页读取失败：{exc}"
-        return {"ok": False, "error": prev["error"], "addresses": prev.get("addresses", []),
+        return {"ok": False, "error": prev["error"],
+                "addresses": prev.get("addresses", []),
                 "via": "", "cached": True, "nav_url": nav_url}
 
     cands = parse_addresses(html)
     say(0, len(cands), f"地址页解析出 {len(cands)} 条候选")
+
+    # 地址页正文是空壳时，顺着 <script src> 去读 JS（线路清单在里面）
+    if not cands:
+        for asset in asset_urls(html, nav_url):
+            say(0, 0, f"地址页无正文，改读脚本 {asset[:60]}")
+            try:
+                js, _js_via, js_via_proxy = fetch_nav_html(
+                    asset, max(timeout, 10), proxy, allow_proxy_fallback,
+                    prefer_proxy or nav_via_proxy)
+            except Exception:  # noqa: BLE001
+                continue
+            cands = parse_domains(js)
+            via = f"{via} + js"
+            nav_via_proxy = bool(nav_via_proxy or js_via_proxy)
+            if cands:
+                break
+        say(0, len(cands), f"脚本里解析出 {len(cands)} 条线路")
+
     if not cands:
         prev = _load_state()
         return {"ok": False, "error": "地址页里没有解析到任何线路",
                 "addresses": prev.get("addresses", []), "via": via,
                 "cached": True, "nav_url": nav_url}
 
-    results: List[dict] = []
     targets = cands[:max(max_check, 1)]
-    for i, c in enumerate(targets, start=1):
-        say(i, len(targets), f"探测 {c['host']}")
-        r = check_one(c["url"], timeout=timeout)
-        r.update({"host": c["host"], "label": c["label"]})
-        results.append(r)
+    say(0, len(targets), f"并行探测 {len(targets)} 条线路…")
+
+    # 地址页本身就是「直连失败、走代理才读到」的 → 站点大概率同样只能代理。
+    # 这时直接从代理通道探测，省掉每条线路一次直连超时（否则 6 条能拖 2 分钟）。
+    probe_via_proxy = bool(proxy and allow_proxy_fallback and nav_via_proxy)
+    results = _probe_many(targets, timeout, proxy if probe_via_proxy else "")
+
+    if probe_via_proxy:
+        # 只给「最优的那条」补一次直连判定：决定这个模块下载要不要挂代理。
+        # 其余线路一律按「仅代理」记录，避免每条都白等一个直连超时。
+        for r in results:
+            r.setdefault("direct", False)
+            if r.get("ok") and not r.get("direct"):
+                r["note"] = "仅代理可达"
+        winner = next((r for r in results if r.get("ok")), None)
+        if winner is not None:
+            d = check_one(winner["url"], min(timeout, 4.0), "")
+            winner["direct"] = bool(d.get("ok"))
+            if winner["direct"]:
+                winner.pop("note", None)
+    elif not any(r.get("ok") for r in results) and proxy and allow_proxy_fallback:
+        say(0, len(targets), "直连都不通，改用代理通道复测…")
+        results = _probe_many(targets, timeout, proxy)
+        for r in results:
+            if r.get("ok"):
+                r["note"] = "仅代理可达"
 
     good = [r for r in results if r.get("ok")]
     bad = [r for r in results if not r.get("ok")]
-    good.sort(key=lambda r: r.get("elapsed_ms", 99999))
+    good.sort(key=lambda r: (0 if r.get("direct") else 1,
+                             r.get("elapsed_ms", 99999)))
     ordered = good + bad
 
     state = _load_state()
@@ -180,6 +326,8 @@ def refresh(nav_url: str = "", timeout: float = 8.0,
     state["via"] = via
     if good:
         state["active"] = good[0]["url"]
+        state["active_direct"] = bool(good[0].get("direct"))
+    state["nav_via_proxy"] = bool(nav_via_proxy)
     state.pop("error", None)
     _save_state(state)
 
@@ -189,10 +337,16 @@ def refresh(nav_url: str = "", timeout: float = 8.0,
     except Exception:
         pass
 
+    active = state.get("active", "")
+    active_item = next((r for r in good if r.get("url", "").rstrip("/") == active), {})
     return {"ok": bool(good), "addresses": state["addresses"],
-            "active": state.get("active", ""), "via": via, "cached": False,
+            "active": active, "via": via, "cached": False,
             "nav_url": nav_url, "good": len(good), "bad": len(bad),
             "checked": len(targets),
+            "direct": bool(active_item.get("direct")),
+            "active_direct": bool(active_item.get("direct")),
+            "nav_via_proxy": bool(nav_via_proxy),
+            "nav_url_reachable": True,
             "error": "" if good else "候选线路都不可用（已保留缓存）"}
 
 

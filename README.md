@@ -48,6 +48,7 @@ scattered across several projects into **one project / one process / one window*
 | 麻豆磁力 | `PornSimilarityPlatform` 麻豆模块 | `madouqu` | 按关键词抓 BT 磁力、去重入库、导出 CSV |
 | 映取 · YT/TikTok | 本项目 | `yttiktok` | 批量链接、画质档位、仅音频、封面、并发下载 |
 | 导航页 · 黄视频 | 本项目 | — | daohang.pro 入口表、黄视频解析下载 |
+| **地址同步** | 本项目 | — | 糖心 / 黄果 / 麻豆 / 九色 **一处同步地址**：先验上次地址 → 再读发布页 → **直连校验**后自动开关代理；启动时自动跑一次 |
 | **库管理** | 本项目 | — | 各库统一浏览 / 就地改值 / 删行 / 导出 CSV / 备份 / 清空 |
 | 设置 | 本项目 | — | 代理自测、目录、并发、主题（即时生效）、系统信息与维护 |
 
@@ -56,7 +57,7 @@ scattered across several projects into **one project / one process / one window*
 ```
 DragonFetch/
 ├── bin/                共享二进制：yt-dlp.exe / ffmpeg.exe / ffprobe.exe / ffplay.exe
-├── DATA/               所有运行期数据（tangxin / huangguo / jiuse / multisite / madouqu / yttiktok / app）
+├── DATA/               所有运行期数据（tangxin / huangguo / jiuse / sites / madouqu / yttiktok / app）
 ├── TEMP/               所有临时文件（按模块分）
 ├── assets/             图标（打包也用）
 ├── launcher/           ★ 唯一前端（PyQt6）
@@ -68,6 +69,7 @@ DragonFetch/
 │   │   ├── backend.py     后端门面：注入 sys.path/环境变量并惰性导入
 │   │   ├── dbstore.py     统一库访问（SQLite + JSON：读/改/删/导出/备份）
 │   │   ├── nav.py         导航页服务：代理抓 daohang.pro → 解析 → 缓存
+│   │   ├── navsync.py     ★ 地址同步中心：四个国内模块取址 + 直连校验 + 开关代理
 │   │   ├── tasks.py       QThread 任务执行器（禁止 UI 线程联网）
 │   │   └── logbus.py      日志总线（UI + logs/launcher-*.log）
 │   └── gui/               界面层
@@ -75,7 +77,7 @@ DragonFetch/
 │       ├── widgets.py     卡片、页头、统计卡、提示条、日志面板、表格工具
 │       ├── shell.py       主窗口：侧栏导航 + 页面栈 + 状态栏 + Toast
 │       └── pages/         home / tangxin / huangguo / jiuse / site_page（×12 站点）
-│                          madouqu / yttiktok / navpage / library / settings_page
+│                          madouqu / yttiktok / navpage / navsync / library / settings_page
 ├── modules/            ★ 只有后端代码（无 GUI、无 DATA、无 TEMP）
 │   ├── tangxin/           糖心后端（相对导入，独立包）
 │   ├── huangguo/hgcore/   黄果后端（原 core 改名）
@@ -100,26 +102,63 @@ DragonFetch/
 ## 运行
 
 ```bat
-python -m launcher.main      :: 或双击 启动.bat
+启动.bat                 :: 推荐双击（自动挑解释器、缺依赖会自己装）
+python -m launcher.main  :: 等价的命令行写法
 ```
 
 需要 Python 3.11+ 且装好 PyQt6（`pip install -r requirements.txt`）；
 `bin/` 内的 yt-dlp / ffmpeg 由全部页面共享。
 
+解释器选择顺序：`DRAGONFETCH_PYTHON` → `C:\Python31x` → 用户级 `Python31x`
+→ `py -3` → PATH 里的 `python`（这段逻辑在 `scripts/_find_python.bat`，启动与打包共用）。
+
 自检（不打开界面，验证路径/后端/bin）：
 
 ```bat
-python -m launcher.main --selftest      :: 结果也写入 logs/selftest.txt
+启动.bat --selftest      :: 结果也写入 logs/selftest.txt
+python -m launcher.main --selftest
 ```
 
 ## 打包
 
 双击根目录 **`打包.bat`**，产出 `dist\DragonFetch\`（整目录即可分发）。
+可选参数：`--no-bin`（不打包 yt-dlp/ffmpeg）、`--skip-build`（只重新组装
+modules/bin/DATA）、`--distpath <目录>`（换产物目录）。
+打包结束后会自动跑一次 `DragonFetch.exe --selftest` 并打印结果。
+
 详见 [`packaging/README.md`](packaging/README.md)。要点：
 
 - onedir：启动快、误报少；`modules/` 以源码形式放在 exe 旁，**改后端不用重打包**。
 - 第三方依赖（requests / bs4 / lxml / yaml / cryptography / pycryptodome / curl_cffi …）写进 spec 的 `hiddenimports`。
 - 打包后可执行 `DragonFetch.exe --selftest` 验证 6 个后端（tangxin/huangguo/multisite/madouqu/jiuse/ytdlp）与 yt-dlp。
+
+> **给维护者**：`*.bat` 必须存成 **GBK + CRLF**。用 LF 换行 cmd 会把整个脚本解析错乱
+> （双击直接报「'xxx' 不是内部或外部命令」）；存成 UTF-8 再 `chcp 65001` 会让 cmd 的
+> 文件指针偏移错乱，中文注释被当成命令执行。`tests/test_scripts.py` 会检查这两条。
+
+## 地址同步（四个国内模块共用一套逻辑）
+
+`launcher/core/navsync.py` 是这四个模块**唯一**的地址管理者，页面在「系统 → 地址同步」。
+
+| 模块 | 地址来源 | 校验方式 |
+|------|----------|----------|
+| 糖心 | `daohang.pro/app.js` 的 `CONFIG.links`（科学线路优先） | 直连打开 + 站点指纹 |
+| 黄果 | 官方发布页（`hgcore.mirror_refresh`） | 发布页候选逐个直连内容校验 |
+| 麻豆 | 站点自带备用域名表（sbs/club/cc/net/org） | 直连 → 不通再代理复测 |
+| 九色 | `dizhi222.pages.dev` 地址页 → 它在引用的 `publish.js` 里 | 并行探测 + 站点指纹 |
+
+每次同步按「三步」走：
+
+1. **先验上次地址**（直连）——通了就直接沿用，不去抓发布页（最快路径，通常 < 2s）；
+2. **不通才读发布页/地址页**（这一步允许走代理，因为发布页常在墙外）；
+3. **落地**：直连能通 → 写该模块的 `route_url / base_url` 并把它的 `proxy_enabled`
+   **关掉**（这就是「不开代理也能下载」的来源）；直连不通 → 保留代理开关并在状态里
+   如实标「需代理」，绝不让模块看起来能用、实际下不了。
+
+启动时主窗口会在 2.5s 后自动跑一次（可在页面里关掉「启动时自动同步」），结果写
+`DATA/app/navsync.json`，侧栏与状态栏都显示摘要。
+
+> 国外站点（XVideos / XNXX / …12 个）**不在这里**，它们仍按「设置 → 代理」正常走代理。
 
 ## 导航页流程（糖心 / 黄果 / 九色）
 

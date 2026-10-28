@@ -13,13 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 import logging
 
-# 添加clf2支持
-try:
-    import clf2
-except ImportError:
-    clf2 = None
-    logging.warning("clf2未安装，将无法处理Cloudflare保护")
-
 # 添加M3U8处理支持
 try:
     from m3u8_tools import playlist2stream, M3u8_stream
@@ -34,6 +27,7 @@ except ImportError:
     yt_dlp = None
 
 from ..base import BaseDownloader
+from ...net.ytdlp_opts import apply_impersonate
 
 logger = logging.getLogger(__name__)
 
@@ -356,33 +350,18 @@ class YtDlpEngine(BaseDownloader):
             'keep_fragments': True,  # 保留已下载的片段
         }
         
-        # 尝试使用 curl_cffi 模拟浏览器 - 这是绕过 PornHub 410 错误的关键
-        # 根据用户测试，--impersonate chrome --no-cookies 可以成功绕过 410 错误
+        # 与 download_manager / ytdlp_adapter 保持一致：必须走 apply_impersonate。
+        # ⚠️ 直接写 opts['impersonate'] = 'chrome'（字符串）会让 YoutubeDL 构造阶段
+        # 命中 assert isinstance(target, ImpersonateTarget) 抛"空消息" AssertionError
+        # ——正是本项目日志里"错误输出为空"的指纹。详见 core/net/ytdlp_opts.py。
+        # PornHub 专属的 extractor_args / clf2 兜底已移除（本项目不做 PH）。
         cookie_file = self.config.get('cookie_file')
-        use_impersonate = False
-        
-        try:
-            import curl_cffi
-            
-            # 测试 impersonate 是否可用（避免与新版 yt-dlp 的兼容性问题）
-            test_opts = {'impersonate': 'chrome', 'quiet': True, 'no_warnings': True}
-            test_ydl = yt_dlp.YoutubeDL(test_opts)
-            del test_ydl  # 清理测试对象
-            
-            opts['impersonate'] = 'chrome'  # 使用 curl_cffi 模拟 Chrome 浏览器
-            
-            # 添加 extractor-args 来确保所有 extractor 请求都使用 impersonate
-            # 这是解决 JSON metadata 下载卡住问题的关键
-            opts['extractor_args'] = {
-                'pornhub': ['impersonate=chrome'],
-                'pornhubpremium': ['impersonate=chrome'],
-            }
-            
-            use_impersonate = True
-            logger.info("YT-DLP Engine: 使用 curl_cffi 模拟 Chrome 浏览器访问 (绕过 410 错误)")
-            logger.info("YT-DLP Engine: 已添加 extractor_args 确保所有请求都使用 impersonate")
-        except (ImportError, AssertionError, Exception) as e:
-            logger.warning(f"curl_cffi 不可用或存在兼容性问题 ({e})，回退到 HTTP 头模拟")
+        use_impersonate = apply_impersonate(opts, "chrome")
+
+        if use_impersonate:
+            logger.info("YT-DLP Engine: 已启用 curl_cffi TLS 指纹伪装 (chrome)")
+        else:
+            logger.warning("curl_cffi 不可用或指纹目标不可用，回退到 HTTP 头模拟")
             # 回退到基本的 HTTP 头配置
             opts['http_headers'] = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -395,16 +374,7 @@ class YtDlpEngine(BaseDownloader):
                 'Sec-Fetch-User': '?1',
                 'Upgrade-Insecure-Requests': '1',
             }
-            
-            # 添加 clf2 (curl_cffi) 作为备用方案 - 类似 Hitomi-Downloader 的做法
-            # 当 yt-dlp 遇到 410 错误时，可以使用 clf2 来绕过
-            try:
-                import clf2
-                opts['_clf2_fallback'] = True  # 标记使用 clf2 备用方案
-                logger.info("YT-DLP Engine: 已启用 clf2 备用方案 (当遇到 410 错误时使用)")
-            except ImportError:
-                logger.warning("clf2 未安装，将无法使用备用方案")
-        
+
         # Cookie支持 - 如果使用 impersonate 则不使用 cookies（--no-cookies）
         if use_impersonate:
             logger.info("使用 impersonate 模式，不加载 cookies 文件")
@@ -564,21 +534,6 @@ class YtDlpEngine(BaseDownloader):
             try:
                 logger.info(f"[Task {task_id}] Starting download (attempt {attempt + 1}/{max_retries}): {url}")
                 
-                # 预处理URL，处理特殊情况
-                url = self._preprocess_url(url)
-                
-                # 处理Cloudflare保护
-                if clf2 and 'pornhub' in url.lower():
-                    try:
-                        logger.info(f"[Task {task_id}] Checking Cloudflare protection...")
-                        session = self._get_session()
-                        res = clf2.solve(url, session=session)
-                        logger.info(f"[Task {task_id}] Cloudflare protection bypassed successfully")
-                        # 更新会话cookie
-                        self._update_session_cookies(session, res.get('cookies', {}))
-                    except Exception as e:
-                        logger.warning(f"[Task {task_id}] Cloudflare bypass failed: {e}")
-                
                 # 获取配置
                 opts = self._get_ydl_options(output_path)
                 
@@ -677,78 +632,6 @@ class YtDlpEngine(BaseDownloader):
         """
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
-    
-    def _preprocess_url(self, url: str) -> str:
-        """
-        预处理URL，处理特殊情况
-
-        Args:
-            url: 原始URL
-
-        Returns:
-            处理后的URL
-        """
-        # 处理PornHub特殊URL格式
-        if 'pornhub' in url.lower():
-            # 处理pornhub_gif_格式
-            if 'pornhub_gif_' in url:
-                url = 'https://www.pornhub.com/gif/{}'.format(
-                    url.replace('pornhub_gif_', ''))
-            # 处理pornhub_album_格式
-            elif 'pornhub_album_' in url:
-                url = 'https://www.pornhub.com/album/{}'.format(
-                    url.replace('pornhub_album_', ''))
-            # 处理pornhub_格式
-            elif 'pornhub_' in url:
-                url = 'https://www.pornhub.com/view_video.php?viewkey={}'.format(
-                    url.replace('pornhub_', ''))
-            # 处理认证跳转URL
-            if '/authenticate/goToLoggedIn' in url:
-                import urllib.parse
-                parsed = urllib.parse.urlparse(url)
-                query_params = urllib.parse.parse_qs(parsed.query)
-                if 'url' in query_params:
-                    url = query_params['url'][0]
-            # 处理onion域名
-            url = url.replace('pornhubthbh7ap3u.onion', 'pornhub.com')
-        return url
-    
-    def _get_session(self):
-        """
-        获取requests会话
-
-        Returns:
-            requests.Session实例
-        """
-        import requests
-        session = requests.Session()
-        # 设置请求头
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-        })
-        # 禁用SSL验证
-        session.verify = False
-        # 添加代理
-        proxy = self.config.get('proxy')
-        if proxy:
-            session.proxies = {
-                'http': proxy,
-                'https': proxy,
-            }
-        return session
-    
-    def _update_session_cookies(self, session, cookies):
-        """
-        更新会话cookie
-
-        Args:
-            session: requests.Session实例
-            cookies: cookie字典
-        """
-        for key, value in cookies.items():
-            session.cookies.set(key, value)
     
     async def get_video_info(self, url: str) -> Dict[str, Any]:
         """

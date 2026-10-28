@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import traceback
 
 
@@ -29,12 +30,31 @@ def _icon_path():
 
 
 def _install_excepthook() -> None:
+    """槽函数里的未捕获异常：写日志 + 提示，**不要**让 Qt 直接 abort 整个程序。
+
+    PyQt6 在 ``sys.excepthook`` 为默认实现时，会把 Python 槽异常当致命错误
+    （进程直接退出）。桌面应用不该因为一个统计卡算错数就闪退，所以这里接管：
+    完整堆栈落 ``logs/ui-error.log``，界面只弹一条提示，其余功能照常可用。
+    """
+    from launcher.core import paths
     from launcher.core.logbus import LOG
 
     def _hook(exc_type, exc, tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
         text = "".join(traceback.format_exception(exc_type, exc, tb))
-        LOG.error(text.strip().splitlines()[-1] if text else "未知异常")
-        sys.__excepthook__(exc_type, exc, tb)
+        try:
+            p = paths.LOGS / "ui-error.log"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n{text}")
+        except Exception:
+            pass
+        try:
+            LOG.error(f"界面异常（已拦截，程序继续）：{text.strip().splitlines()[-1]}")
+        except Exception:
+            print(text, file=sys.stderr)
 
     sys.excepthook = _hook
 
@@ -103,6 +123,26 @@ def _selftest() -> int:
         lines.append(f"  本地库    : {len(dbstore.stores())} 个")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"  本地库    : FAIL {exc}")
+
+    # 地址同步状态（离线读取上次结果，不联网，避免自检被网络拖住）
+    try:
+        from launcher.core import navsync
+        rows = navsync.summary()
+        if not navsync.state().get("at"):
+            # 全新数据目录还没同步过，属于正常状态，不算自检失败
+            lines.append("  地址同步  : 尚未执行（首次启动会自动同步一次）")
+            rows = []
+        else:
+            ok_n = sum(1 for r in rows if r["ok"])
+            direct_n = sum(1 for r in rows if r["ok"] and r["direct"])
+            lines.append(f"  地址同步  : {ok_n}/{len(rows)} 可用 · 直连 {direct_n}"
+                         f"（{navsync.last_run_text().split('· ')[-1]}）")
+        for r in rows:
+            lines.append(f"    · {r['label']:10s} {(r['url'] or '未同步')[:44]:46s}"
+                         + ("直连" if r["ok"] and r["direct"]
+                            else ("需代理" if r["ok"] else "失败")))
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  地址同步  : FAIL {exc}")
 
     lines.append("结果      : " + ("通过" if ok else "失败"))
     text = "\n".join(lines)

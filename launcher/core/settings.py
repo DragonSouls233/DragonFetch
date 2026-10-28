@@ -26,6 +26,14 @@ DEFAULTS: Dict[str, Any] = {
         "url": "https://daohang.pro/app.js",
         "updated_at": 0,
     },
+    "navsync": {
+        # 统一地址同步中心（糖心 / 黄果 / 麻豆 / 九色）
+        "auto_on_start": True,        # 每次打开软件都同步一次并做直连校验
+        "timeout": 8,                 # 单个地址的直连探测超时
+        "deadline": 60,               # 一次同步的总预算，超时的模块如实标「超时」
+        "use_proxy_for_nav": True,    # 读发布页/地址页允许用代理（站点本身仍按校验结果）
+        "parallel": True,
+    },
     "tangxin": {
         "output_base": str(paths.data_dir("tangxin", "downloads")),
         # 按需求：导航页用代理读，站点默认直连（科学线路可直连）
@@ -45,12 +53,17 @@ DEFAULTS: Dict[str, Any] = {
         "site_id": "huangguoai",
         "sync_download": "",     # 移动硬盘目标（留空则自动识别）
         "sync_server": "",       # 服务器/备份盘目标
+        # 地址同步中心测出来的结果：镜像能直连就不挂代理
+        "proxy_enabled": False,
     },
     "jiuse": {
         "nav_url": "https://dizhi222.pages.dev/",
         "download_dir": str(paths.data_dir("jiuse", "downloads")),
-        # 九色全程直连（按需求：不挂代理）
+        # 九色优先直连（按需求：不挂代理）。地址同步中心校验后会自动改写：
+        # 直连能开 → direct_only=True；只能代理 → False 并由页面带上代理
         "direct_only": True,
+        "proxy_enabled": False,
+        "active_url": "",
         "check_limit": 8,
         "timeout": 8,
     },

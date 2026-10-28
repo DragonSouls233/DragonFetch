@@ -36,13 +36,13 @@ BIN_FILES = ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "ffplay.exe")
 DATA_SKELETON = [
     "DATA/app",
     "DATA/app/backups",
-    "DATA/tangxin",
-    "DATA/huangguo",
-    "DATA/jiuse",
-    "DATA/multisite",
+    "DATA/tangxin/downloads",
+    "DATA/huangguo/downloads",
+    "DATA/jiuse/downloads",
+    "DATA/madouqu/downloads",
+    "DATA/multisite/downloads",
     "DATA/sites",
-    "DATA/madouqu",
-    "DATA/yttiktok",
+    "DATA/yttiktok/downloads",
     "TEMP/tangxin",
     "TEMP/huangguo",
     "TEMP/jiuse",
@@ -51,6 +51,11 @@ DATA_SKELETON = [
     "TEMP/yttiktok",
     "logs",
 ]
+
+# 发布包里必须出现的后端包（少了界面会缺页或报「未找到后端」）
+REQUIRED_MODULES = (
+    "tangxin", "huangguo", "multisite", "sites", "madouqu", "jiuse", "yttiktok",
+)
 
 
 def _is_link(p: Path) -> bool:
@@ -157,6 +162,11 @@ logs\\      前端运行日志。
 
 
 def main(argv=None) -> int:
+    # --dist 必须真正生效：_copy_bins / _write_readme 直接读模块级 DIST，
+    # 以前只有 _copy_tree 用了参数，导致自定义产物目录时 bin 与说明文件
+    # 仍写进默认的 dist\DragonFetch（产物里 ffmpeg / yt-dlp 全部缺失）。
+    global DIST
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--dist", default=str(DIST))
     ap.add_argument("--no-bin", action="store_true", help="不复制 bin/（小体积分发）")
@@ -164,6 +174,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     dist = Path(args.dist)
+    DIST = dist
     if not (dist / "DragonFetch.exe").exists():
         print(f"[!] 未找到 {dist / 'DragonFetch.exe'}，请先运行 PyInstaller")
         return 1
@@ -171,6 +182,10 @@ def main(argv=None) -> int:
     print(f"[1/4] 复制后端源码 modules/ -> {dist / 'modules'}")
     n, size = _copy_tree(ROOT / "modules", dist / "modules", args.verbose)
     print(f"      {n} 个文件，{size / 1024 / 1024:.1f} MB")
+    missing = [m for m in REQUIRED_MODULES if not (dist / "modules" / m).is_dir()]
+    if missing:
+        print(f"      [x] 缺少后端包：{', '.join(missing)}")
+        return 1
 
     print("[2/4] 复制二进制 bin/")
     if args.no_bin:
@@ -178,6 +193,12 @@ def main(argv=None) -> int:
     else:
         n2, size2 = _copy_bins()
         print(f"      {n2} 个文件，{size2 / 1024 / 1024:.1f} MB")
+        if n2 == 0:
+            print("      [x] 一个二进制都没复制成功，请检查根目录 bin/")
+            return 1
+        miss_bin = [b for b in BIN_FILES if not (dist / "bin" / b).exists()]
+        if miss_bin:
+            print(f"      [!] 缺少：{', '.join(miss_bin)}（对应功能会不可用）")
 
     print("[3/4] 复制图标与文档")
     assets = dist / "assets"

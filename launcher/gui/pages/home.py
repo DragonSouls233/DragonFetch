@@ -141,7 +141,13 @@ class HomePage(Page):
             c4.set_hint(st["error"][:40])
         else:
             c4.set_value(st.get("count", 0))
-            n_js = len(js.get("addresses") or [])
+            # backend.stats() 给的 addresses 是**条数(int)**，不是列表；
+            # 这里曾经写 len(...) 直接抛 TypeError，PyQt6 会把槽里的未捕获异常
+            # 当致命错误 abort 掉整个进程（打开总览就闪退），必须按 int 处理。
+            try:
+                n_js = int(js.get("addresses") or 0)
+            except (TypeError, ValueError):
+                n_js = 0
             c4.set_hint(f"九色线路 {n_js} 条" if n_js else "一域名一模块")
 
         self.lbl_env.setText(

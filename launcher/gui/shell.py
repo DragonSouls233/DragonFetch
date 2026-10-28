@@ -8,18 +8,18 @@ from __future__ import annotations
 
 from typing import Callable, Dict
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
 )
 
-from ..core import backend, paths
+from ..core import backend, navsync, paths
 from ..core.version import APP_VERSION
 from ..core.logbus import LOG
 from ..core.settings import settings
-from ..core.tasks import CENTER
+from ..core.tasks import CENTER, Task
 from . import theme
 from .widgets import Toast
 
@@ -32,6 +32,7 @@ BASE_NAV = [
     ("madouqu", "◍", "麻豆磁力", "下载器"),
     ("yttiktok", "▶", "映取 · YT/TikTok", "下载器"),
     ("nav", "✦", "导航页 · 黄视频", "下载器"),
+    ("navsync", "⇄", "地址同步", "系统"),
     ("library", "▤", "库管理", "系统"),
     ("settings", "⚙", "设置", "系统"),
 ]
@@ -77,12 +78,13 @@ def _factory(key: str) -> Callable[[], QWidget]:
         from .pages.madouqu import MadouquPage
         from .pages.yttiktok import YtTiktokPage
         from .pages.navpage import NavPage
+        from .pages.navsync import NavSyncPage
         from .pages.library import LibraryPage
         from .pages.settings_page import SettingsPage
         _FACTORIES.update({
             "home": HomePage, "tangxin": TangxinPage, "huangguo": HuangguoPage,
             "jiuse": JiusePage, "madouqu": MadouquPage,
-            "yttiktok": YtTiktokPage, "nav": NavPage,
+            "yttiktok": YtTiktokPage, "nav": NavPage, "navsync": NavSyncPage,
             "library": LibraryPage, "settings": SettingsPage,
         })
     return _FACTORIES[key]
@@ -200,6 +202,7 @@ class MainWindow(QMainWindow):
 
         self._pages: Dict[str, QWidget] = {}
         self._log_dialog: LogDialog | None = None
+        self._navsync_task: Task | None = None
         self.toast = Toast(central)
 
         self._build_statusbar()
@@ -208,6 +211,11 @@ class MainWindow(QMainWindow):
 
         self.switch_page(s.get("window.last_page", "home") or "home")
         self._refresh_side_status()
+
+        # 每次打开都同步一次地址并做直连校验：糖心/黄果/麻豆/九色四个模块
+        # 的域名靠这一步保鲜，直连能过就把它们的代理开关关掉。
+        if navsync.auto_on_start():
+            QTimer.singleShot(2500, self.auto_navsync)
 
     # ------------------------------------------------------------ 页面
     def switch_page(self, key: str) -> None:
@@ -267,14 +275,52 @@ class MainWindow(QMainWindow):
         s = settings()
         if s.get("proxy.enabled", True):
             self.lbl_proxy.setText(f"代理：{s.proxy_url or '未填写'}")
-            self.sidebar.set_status(f"导航页代理：{s.proxy_url or '未填写'}")
+            self.sidebar.set_status(navsync.last_run_text())
         else:
             self.lbl_proxy.setText("代理：关闭（直连）")
-            self.sidebar.set_status("导航页代理：关闭")
+            self.sidebar.set_status("代理：关闭 · " + navsync.last_run_text())
         try:
             self.lbl_ytdlp.setText(f"yt-dlp：{backend.ytdlp_version()}")
         except Exception:
             self.lbl_ytdlp.setText("yt-dlp：-")
+
+    def refresh_side_status(self) -> None:
+        """对外（各页面同步完地址后）刷新状态栏与侧栏摘要。"""
+        self._refresh_side_status()
+
+    # ------------------------------------------------------------ 地址同步
+    def auto_navsync(self) -> None:
+        """启动后台地址同步：不阻塞界面，完成后只在提示与状态栏报结果。"""
+        if self._navsync_task is not None and self._navsync_task.isRunning():
+            return
+        self.sidebar.set_status("地址同步中…")
+        task = Task(navsync.sync_all)
+        task.done.connect(self._on_navsync_done)
+        task.failed.connect(self._on_navsync_failed)
+        self._navsync_task = task
+        CENTER.start(task)
+
+    def _on_navsync_done(self, res: dict) -> None:
+        ok = int(res.get("ok") or 0)
+        total = int(res.get("total") or 0)
+        direct = int(res.get("direct") or 0)
+        self._refresh_side_status()
+        if ok:
+            self.notify(f"地址同步完成：{ok}/{total} 可用（直连 {direct} 个）",
+                        "ok" if direct else "warn")
+        else:
+            self.notify("地址同步失败：四个模块都没拿到可用地址，已沿用上次配置",
+                        "warn")
+        page = self._pages.get("navsync")
+        if page is not None and hasattr(page, "_fill"):
+            try:
+                page._fill()  # noqa: SLF001 - 页面刷新态就是它的职责
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_navsync_failed(self, tb: str) -> None:
+        self.sidebar.set_status(navsync.last_run_text())
+        LOG.warn(f"地址同步异常：{(tb or '').splitlines()[-1][:120]}")
 
     def _on_tasks_changed(self, count: int) -> None:
         self.lbl_tasks.setText(f"任务：{count}")

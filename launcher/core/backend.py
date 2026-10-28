@@ -170,7 +170,12 @@ def apply_huangguo_settings(ns: SimpleNamespace | None = None) -> SimpleNamespac
     s = settings()
     try:
         data = ns.settings.load()
-        data["proxy_url"] = s.proxy_url if s.get("proxy.enabled", True) else ""
+        # 黄果的代理开关由「地址同步中心」按直连校验结果决定：
+        # 镜像直连能过 → 关掉代理（下载更快）；过不了 → 保持代理，别硬关。
+        hg_proxy = s.get("huangguo.proxy_enabled", None)
+        if hg_proxy is None:
+            hg_proxy = s.get("proxy.enabled", True)
+        data["proxy_url"] = s.proxy_url if hg_proxy else ""
         data["concurrency"] = int(s.get("huangguo.concurrency") or data.get("concurrency") or 3)
         dl = (s.get("huangguo.download_dir") or "").strip()
         if dl:

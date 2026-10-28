@@ -28,7 +28,6 @@ class ParserFactory:
         'xvideos': 'XVideosParser',
         'xhamster': 'XHamsterParser',
         'javdb': 'JAVDBParser',
-        'madouqu': 'MadouquParser',
     }
 
     # 站点域名映射
@@ -53,10 +52,6 @@ class ParserFactory:
         'javdb': [
             r'javdb',
             r'javdb\.com',
-        ],
-        'madouqu': [
-            r'madouqu',
-            r'madouqu\.sbs',
         ],
     }
 
@@ -85,14 +80,17 @@ class ParserFactory:
         elif site_lower in ('porn91', 'xvideos', 'xhamster', 'javdb'):
             # 这些站点的解析器模块在仓库中并不存在（历史上未实现或已移除）。
             # 原先直接 import 会抛出难以定位的 ModuleNotFoundError，
-            # 这里改为显式的不支持错误；javdb / madouqu 请走各自的独立模块。
+            # 这里改为显式的不支持错误；javdb 请走各自的独立模块。
             raise SiteNotSupportedError(
                 f"站点 '{site}' 的解析器尚未实现，无法创建"
             )
         elif site_lower == 'madouqu':
-            from .site_parsers.madouqu import MadouquParser
-            logger.info(f"创建解析器: {site} (BT磁力)")
-            return MadouquParser(config)
+            # 麻豆是 BT 磁力站，唯一实现在独立模块 modules/madouqu
+            # （backend.madouqu_crawler 已接线 madouqu.core.crawler）。
+            # 这里不再内置同名解析器，避免两套实现各自漂移。
+            raise SiteNotSupportedError(
+                "madouqu 请使用独立模块 modules/madouqu（BT 磁力），多站点工厂不再创建该解析器"
+            )
         else:
             logger.error(f"不支持的站点: {site}")
             raise SiteNotSupportedError(f"不支持的站点: {site}")

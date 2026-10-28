@@ -38,8 +38,11 @@ class DuanjuPage(HuangguoPage):
     # ---------------------------------------------------------------- 构建
     def build(self) -> None:
         super().build()
-        # 平台总览放在最前：进页面先看全局，再切到具体平台浏览
+        # 平台总览放在最前：进页面先看全局，再切到具体平台浏览。
+        # 注意 insertTab 会把原来的 currentIndex 往后顶（剧库变 1），
+        # 所以插完要显式切回 0，否则进来看到的是剧库页。
         self.tabs.insertTab(0, self._tab_platform(), "平台总览")
+        self.tabs.setCurrentIndex(0)
         self._platform_rows: list[dict] = []
         self._scan_task = None
 
@@ -93,6 +96,20 @@ class DuanjuPage(HuangguoPage):
         bl.addWidget(self.lbl_platform_stats, 1)
         lay.addWidget(bar)
 
+        # ---- 各站与黄果主库的重合度（用户要的「对照」结论）
+        ov = Card()
+        ol = QVBoxLayout(ov)
+        ol.setContentsMargins(14, 8, 14, 8)
+        ol.setSpacing(4)
+        t2 = QLabel("与黄果主库的对照")
+        t2.setObjectName("H2")
+        ol.addWidget(t2)
+        self.lbl_overlap = QLabel("尚未扫描：点「扫描全平台」后给出各平台重合率")
+        self.lbl_overlap.setObjectName("Muted")
+        self.lbl_overlap.setWordWrap(True)
+        ol.addWidget(self.lbl_overlap)
+        lay.addWidget(ov)
+
         lay.addWidget(HLine())
 
         # ---- 聚合库表格
@@ -118,8 +135,10 @@ class DuanjuPage(HuangguoPage):
                 if not s.get("enabled", True):
                     continue
                 role = "主" if self._ns.platform.is_primary(s.get("id")) else "补"
+                # 取不到直链的站标「仅浏览」，免得用户以为能下
+                mark = "" if s.get("downloadable", True) else "（仅浏览）"
                 self.cmb_platform.addItem(
-                    f"{s.get('name')}（{role}）", s.get("id"))
+                    f"{s.get('name')}（{role}）{mark}", s.get("id"))
             self.cmb_platform.blockSignals(False)
         except Exception:  # noqa: BLE001
             pass
@@ -145,7 +164,10 @@ class DuanjuPage(HuangguoPage):
             self._refresh_site_bar()
             self.reload()
             self.tabs.setCurrentIndex(self._index_of_library())
-            self.notify(f"已切到 {site.get('name')}", "ok")
+            if not site.get("downloadable", True):
+                self.notify(f"{site.get('name')}：{site.get('note', '')}", "warn")
+            else:
+                self.notify(f"已切到 {site.get('name')}", "ok")
         except Exception as exc:  # noqa: BLE001
             self.notify(f"切换失败：{exc}", "err")
 
@@ -187,9 +209,7 @@ class DuanjuPage(HuangguoPage):
         self.btn_scan.setEnabled(True)
         self._platform_rows = list(rows or [])
         self._reload_platform_table()
-        ok = sum(1 for v in (res or {}).values() if isinstance(v, int) and v > 0)
-        self.lbl_platform_stats.setText(
-            f"扫描完成：{ok} 个平台入库 · 聚合 {len(self._platform_rows)} 条")
+        self._update_stats_text()
         self.notify(f"平台扫描完成，共 {len(self._platform_rows)} 条", "ok")
 
     def _scan_failed(self, tb: str) -> None:
@@ -278,7 +298,51 @@ class DuanjuPage(HuangguoPage):
         self._ensure_platform_site()
         super().on_show()
         self._fill_platforms()
+        self._load_platform_rows()
         self._reload_platform_table()
+
+    def _load_platform_rows(self) -> None:
+        """从聚合库里读回已收录的剧目（不用先扫描就能看到历史结果）。"""
+        try:
+            self._platform_rows = list(self._ns.platform.list_catalog())
+        except Exception:  # noqa: BLE001
+            self._platform_rows = []
+        self._update_stats_text()
+
+    def _update_stats_text(self) -> None:
+        """顶部统计：各平台收录条数 + 独有 / 重复，并给出与黄果的重合率。"""
+        try:
+            stats = self._ns.platform.stats()
+        except Exception:  # noqa: BLE001
+            return
+        if not stats:
+            self.lbl_platform_stats.setText("尚未扫描")
+            return
+        total = sum(v["total"] for v in stats.values())
+        uniq = sum(v["unique"] for v in stats.values())
+        bits = " · ".join(
+            f"{self._ns.platform.site_label(sid)} {v['total']}"
+            for sid, v in stats.items())
+        self.lbl_platform_stats.setText(
+            f"共 {total} 条 · 独有 {uniq} · 重复 {total - uniq}　|　{bits}")
+        self._update_overlap_text()
+
+    def _update_overlap_text(self) -> None:
+        """各补充站与黄果主库的重合率（重合过多的站会标出建议）。"""
+        try:
+            report = self._ns.platform.overlap_report()
+        except Exception:  # noqa: BLE001
+            return
+        if not report:
+            self.lbl_overlap.setText("尚未扫描：点「扫描全平台」后给出各平台重合率")
+            return
+        lines = []
+        for r in report:
+            flag = "建议纳入" if r.get("recommend") else "重合过多·建议不纳入"
+            lines.append(
+                f"{r['name']}：本站 {r['total']} 部，与黄果重合 {r['dup']} 部"
+                f"（{r['overlap_rate'] * 100:.0f}%），黄果没有的 {r['unique']} 部 → {flag}")
+        self.lbl_overlap.setText("\n".join(lines))
 
     def _ensure_platform_site(self) -> None:
         try:

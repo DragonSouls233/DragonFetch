@@ -264,23 +264,29 @@ SITE_YOUZIDJ = {
     "markers": ["home-drama-card", "drama-poster-image"],
     "strong_markers": ["home-drama-card"],
     "required": ["home-drama-card"],
-    "categories": [],
+    "categories": [
+        ("全部短剧", "/"),
+    ],
     "pager": {"style": "path", "segment": "page"},
     "urls": {
-        "detail": "/drama/{did}/",
-        "play": "/video/{did}/{ep}/",
-        "play_ep": "/video/{did}/{ep}/",
+        # 柚子的站点 id 是 slug：/dramas/{slug}/season-1/
+        "detail": "/dramas/{did}/season-1/",
+        "play": "/dramas/{did}/season-1-episode-{ep}/",
+        "play_ep": "/dramas/{did}/season-1-episode-{ep}/",
         "search": "/search/?q={kw}",
+        "topic": "/tags/{slug}/",
     },
     "download_subdir": "youzidj",
     "cover_encrypted": False,
     "cover_crypt": "",
     "backend": "backend_youzidj",
     "color": "#f2c94c",
-    # 暂未接入：列表模板已认出来（home-drama-card），但详情/播放页结构还没拆完，
-    # 打开这个开关前必须先补齐 parser_youzidj + backend_youzidj。
-    "enabled": False,
-    "note": "柚子短剧（模板已识别，解析器待补，暂不参与扫描）",
+    # 已接入浏览/详情。播放直链带凭证（master.m3u8 直取 403，浏览器里走
+    # 带 token 的 DASH 分片），下载需要浏览器态放流，故先只做内容补全。
+    "enabled": True,
+    # 播放直链带凭证，浏览器态才能放流 → 暂时只能浏览
+    "downloadable": False,
+    "note": "柚子短剧（浏览/详情可用；播放凭证在浏览器端，暂不能直接下载）",
 }
 
 SITE_AIWU = {
@@ -306,17 +312,21 @@ SITE_AIWU = {
         "detail": "/detail/{did}/",
         "play": "/play/{did}-1-{ep}/",
         "play_ep": "/play/{did}-1-{ep}/",
-        "search": "/search/?q={kw}",
+        "search": "/search/{kw}/",
     },
     "download_subdir": "aiwu",
     "cover_encrypted": False,
     "cover_crypt": "",
     "backend": "backend_aiwu",
     "color": "#6fcf97",
-    # 暂未接入：列表/详情能解析，但**播放地址是 JS 动态下发**（播放页里既没有
-    # m3u8 也没有 mp4，实测），要拿到直链必须逆向前端 JS，属于独立工作量。
-    "enabled": False,
-    "note": "AI污短剧（列表/详情可解析，播放直链需逆向，暂不参与扫描）",
+    # 已接入浏览/详情。⚠ 片源与黄果同源：player_data.from="huangguo"，
+    # vod id 与封面 /upload/huangguo/{vid}.jpg 一一对应 —— 跨站去重会大面积命中。
+    # 播放直链由站点解析器下发，而 /api.php/provide/vod/ 返回 "closed"、
+    # /static/player/ 404，所以本站**取不到 m3u8**，只能浏览不能下载。
+    "enabled": True,
+    # maccms 解析接口返回 closed、静态播放器 404 → 取不到直链，只能浏览
+    "downloadable": False,
+    "note": "AI污短剧（片源=黄果，浏览可用；解析接口已关闭，取不到直链）",
 }
 
 # 候选站点顺序即默认优先级（前者优先）

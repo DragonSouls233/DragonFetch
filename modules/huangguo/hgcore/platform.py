@@ -70,7 +70,17 @@ def normalize_title(title: str) -> str:
 
 
 def init_db() -> None:
-    """建表（幂等）。"""
+    """建表（幂等）。
+
+    聚合表与剧库表在同一个 SQLite 文件里，所以先让剧库把 episodes/dramas 建好
+    （否则 list_catalog 的 JOIN 会报 no such table）。两个 init 各自拿同一把锁，
+    但**顺序调用不嵌套**，不会死锁。
+    """
+    try:
+        from .library_db import init_db as _lib_init
+        _lib_init()
+    except Exception:                            # noqa: BLE001
+        pass
     with _tx() as c:
         c.executescript(_TABLE)
 
@@ -128,27 +138,41 @@ def upsert_drama(site_id: str, drama, detail_url: str = "") -> None:
 def refresh_uniqueness() -> Tuple[int, int]:
     """按主站优先重算 is_unique / dup_of。
 
+    口径：**一个标题只在一个站出现**才算「独有」（is_unique=1）；
+    只要在两个及以上站出现，**所有**相关记录都标 is_unique=0，并记下
+    与自己重复的那个站（dup_of）。
+
+    为什么不把主站那条留成独有：主站的剧本来就在黄果剧库里，
+    「只提取独有的」指的是**别的平台有、黄果没有**的那些片；
+    若主站那条也算独有，筛选出来的就是黄果的老片，违背需求。
+
     返回 (独有条数, 重复条数)。
     """
     with _tx() as c:
         rows = c.execute(
             "SELECT site_id, did, title_key FROM platform_dramas").fetchall()
-        owner: Dict[str, Tuple[str, str]] = {}   # title_key -> (site_id, did)
-        dup_pairs: List[Tuple[str, str, str]] = []
+
+        groups: Dict[str, List[Tuple[str, str]]] = {}
         for r in rows:
-            key = r["title_key"]
-            cur = owner.get(key)
-            if cur is None:
-                owner[key] = (r["site_id"], r["did"])
+            groups.setdefault(r["title_key"], []).append((r["site_id"], r["did"]))
+
+        dup_pairs: List[Tuple[str, str, str]] = []
+        for _key, members in groups.items():
+            # 按站分组：同一个站里出现多个同名（不同剧 id 撞了同名）**不算**
+            # 跨站重复，跨站才判重。
+            by_site: Dict[str, List[str]] = {}
+            for site_id, did in members:
+                by_site.setdefault(site_id, []).append(did)
+            if len(by_site) <= 1:
                 continue
-            # 主站优先占位
-            if is_primary(cur[0]) and not is_primary(r["site_id"]):
-                dup_pairs.append((r["site_id"], r["did"], cur[0]))
-            elif is_primary(r["site_id"]) and not is_primary(cur[0]):
-                dup_pairs.append((cur[0], cur[1], r["site_id"]))
-                owner[key] = (r["site_id"], r["did"])
-            else:
-                dup_pairs.append((r["site_id"], r["did"], cur[0]))
+            # 代表站：主站优先（黄果系），否则取第一个
+            rep_site = sorted(by_site.keys(),
+                              key=lambda s: (0 if is_primary(s) else 1))[0]
+            others = [s for s in by_site if s != rep_site]
+            for site_id, dids in by_site.items():
+                other = rep_site if site_id != rep_site else others[0]
+                for did in dids:
+                    dup_pairs.append((site_id, did, other))
 
         c.execute("UPDATE platform_dramas SET is_unique=1, dup_of=''")
         for site_id, did, other in dup_pairs:
@@ -208,25 +232,36 @@ def _detail_url_of(site: Dict, drama) -> str:
 
 
 def scan_all(max_pages: int = 0, on_progress=None,
-             only_extra: bool = True) -> Dict[str, int]:
-    """扫描所有短剧站。
+             include_primary: bool = True, workers: int = 6) -> Dict[str, int]:
+    """扫描所有短剧站（**并发**）。
 
-    only_extra=True 时**跳过主站**（黄果系）——它们的库本来就在剧库里，
-    聚合层只需要知道主站有哪些剧（用于判重），不必重复扫。
-    返回 {site_id: 条数}。
+    include_primary=True（默认）连主站一起扫 —— 判重必须知道主库**全量**
+    有什么，只靠剧库里「用户浏览过的那些」会把重合率算低（主站有 28 页，
+    剧库通常只有几十部）。全扫之后重合率才准。
+
+    并发说明：http_client 的 Session 是线程本地的（每线程一个连接池），
+    所以多线程抓是安全的；sqlite 写入走同一把锁，串行落库。
+
+    返回 {site_id: 条数}（-1 表示该站失败）。
     """
-    out: Dict[str, int] = {}
-    for site in platform_sites():
-        sid = site["id"]
-        if only_extra and is_primary(sid):
-            continue
+    from concurrent.futures import ThreadPoolExecutor
+
+    sites_to_scan = [s for s in platform_sites()
+                     if include_primary or not is_primary(s["id"])]
+
+    def _one(site: Dict) -> Tuple[str, int]:
         try:
-            n = scan_site(sid, max_pages=max_pages, on_progress=on_progress)
-            out[sid] = n
+            return site["id"], scan_site(site["id"], max_pages=max_pages,
+                                         on_progress=on_progress)
         except Exception as exc:                # noqa: BLE001 - 单站失败继续
-            out[sid] = -1
             if on_progress:
                 on_progress(0, 0, f"{site.get('name')} 扫描失败：{exc}"[:100])
+            return site["id"], -1
+
+    out: Dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(sites_to_scan)))) as ex:
+        for sid, n in ex.map(_one, sites_to_scan):
+            out[sid] = n
     refresh_uniqueness()
     return out
 
@@ -291,7 +326,7 @@ def list_catalog(site_id: str = "", only_unique: bool = False,
     if keyword:
         sql += " AND p.title LIKE ?"
         params.append(f"%{keyword}%")
-    sql += " ORDER BY p.updated_at DESC LIMIT 2000"
+    sql += " ORDER BY p.updated_at DESC LIMIT 20000"
     with _tx() as c:
         rows = c.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
@@ -319,3 +354,63 @@ def stats() -> Dict[str, int]:
             "SELECT site_id, COUNT(*) n, SUM(is_unique) u FROM platform_dramas "
             "GROUP BY site_id").fetchall()
     return {r["site_id"]: {"total": r["n"], "unique": r["u"] or 0} for r in rows}
+
+
+# ---------------------------------------------------------------- 重合度
+
+# 重合率超过这个比例就认为「和主库基本重复」，不建议纳入下载范围。
+# 依据用户口径：「一致的太多就不加入，如果不多还是需要加入进来」。
+OVERLAP_SKIP_THRESHOLD = 0.80
+
+
+def overlap_report() -> List[Dict]:
+    """各补充站与**主库（黄果系）**的重合度报告。
+
+    重合率 = 该站剧目中，标题键也出现在主库里的比例。
+    返回按重合率从高到低排序的列表：
+        {site_id, name, total, dup, overlap_rate, unique, recommend}
+    recommend=False 表示重合过多，建议不纳入。
+    """
+    init_db()
+    with _tx() as c:
+        rows = c.execute(
+            "SELECT site_id, title_key, is_unique FROM platform_dramas").fetchall()
+
+    primary_keys = set()
+    per_site: Dict[str, List[str]] = {}
+    for r in rows:
+        sid = r["site_id"]
+        per_site.setdefault(sid, []).append(r["title_key"])
+        if is_primary(sid):
+            primary_keys.add(r["title_key"])
+
+    out: List[Dict] = []
+    for sid, keys in per_site.items():
+        if is_primary(sid):
+            continue
+        uniq_keys = set(keys)
+        dup = len(uniq_keys & primary_keys)
+        total = len(uniq_keys)
+        rate = (dup / total) if total else 0.0
+        out.append({
+            "site_id": sid,
+            "name": site_label(sid),
+            "total": total,
+            "dup": dup,
+            "overlap_rate": rate,
+            "unique": total - dup,
+            "recommend": rate < OVERLAP_SKIP_THRESHOLD,
+        })
+    out.sort(key=lambda x: -x["overlap_rate"])
+    return out
+
+
+def refresh_all() -> Dict[str, int]:
+    """扫描全部站 + 重算去重/重合度。
+
+    返回 {site_id: 收录条数}。
+    """
+    res = scan_all(max_pages=0)
+    ensure_primary_index()
+    refresh_uniqueness()
+    return res

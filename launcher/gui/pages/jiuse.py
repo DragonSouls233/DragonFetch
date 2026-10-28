@@ -13,7 +13,8 @@ import os
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
     QPushButton, QSpinBox, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -23,7 +24,7 @@ from ...core import backend, paths
 from ...core.settings import settings
 from ...core.tasks import CENTER, Task
 from ..preview import PreviewPane
-from ..widgets import Badge, Card, HLine, make_table, open_path
+from ..widgets import Badge, Card, CoverLoader, HLine, make_table, open_path
 from .base import Page
 
 
@@ -228,7 +229,15 @@ class JiusePage(Page):
         row4.addWidget(self.btn_dl)
         gl.addLayout(row4)
 
-        self.table = make_table(["选择", "标题", "地址"], [50, 420, 560])
+        self.table = make_table(["选择", "封面 / 标题", "作者", "地址"],
+                                [50, 440, 140, 460])
+        # 行高给缩略图留位置：34px 的行塞进 128x72 的封面会只剩一条缝
+        self.table.verticalHeader().setDefaultSectionSize(78)
+        self.table.setIconSize(QSize(120, 68))
+        self._covers = CoverLoader(self.table, QSize(120, 68))
+        self._covers.set_referer("https://91porny.com/")
+        self._covers.loaded.connect(self._cover_ready)
+        self._cover_rows: dict[str, list[int]] = {}
         self.table.itemChanged.connect(self._update_pick)
         self.table.itemSelectionChanged.connect(self._preview_selected)
         self.table.setMinimumHeight(220)
@@ -466,6 +475,7 @@ class JiusePage(Page):
         self.btn_home.setEnabled(True)
         items = list(res.get("items") or [])
         self._items = items
+        self._cover_rows = {}
         self.table.blockSignals(True)
         self.table.setRowCount(0)
         for it in items:
@@ -476,14 +486,48 @@ class JiusePage(Page):
             chk.setCheckState(Qt.CheckState.Unchecked)
             chk.setData(Qt.ItemDataRole.UserRole, it)
             self.table.setItem(r, 0, chk)
-            self.table.setItem(r, 1, QTableWidgetItem(it.get("title", "")))
-            self.table.setItem(r, 2, QTableWidgetItem(it.get("url", "")))
+            title_it = QTableWidgetItem(it.get("title", ""))
+            # 封面临时占位：先用缓存，没缓存就发起异步请求，图到了再 setIcon。
+            # 直接把图塞进合成大图会卡 UI（29 张 × 上百 KB）。
+            cover = (it.get("cover") or "").strip()
+            if cover:
+                pm = self._covers.cached(cover)
+                if pm is not None:
+                    title_it.setIcon(QIcon(pm))
+                else:
+                    self._cover_rows.setdefault(cover, []).append(r)
+                    self._covers.load(cover)
+            title_it.setToolTip(it.get("title", ""))
+            self.table.setItem(r, 1, title_it)
+            # 作者/演员：卡片里两种写法（/dashen/ 与 /author/）都已解析，
+            # 单独一列显示才看得出"这条是谁的"，否则只能去 tooltip 里找。
+            author_it = QTableWidgetItem((it.get("author") or "").strip())
+            if it.get("duration"):
+                author_it.setToolTip(f"时长 {it['duration']}")
+            self.table.setItem(r, 2, author_it)
+            addr_it = QTableWidgetItem(it.get("url", ""))
+            dur = (it.get("duration") or "").strip()
+            if dur:
+                addr_it.setToolTip(f"时长 {dur}\n{it.get('url', '')}")
+            self.table.setItem(r, 3, addr_it)
         self.table.blockSignals(False)
         self.badge_grab.setText(f"{len(items)} 条")
         self.lbl_pick.setText("已选 0")
+        with_cover = sum(1 for it in items if (it.get("cover") or "").strip())
         self.notify(f"{res.get('title') or '页面'} · 识别到 {len(items)} 条"
+                    + (f"，封面 {with_cover} 条" if with_cover else "")
                     + ("" if items else "（站点结构可能变了，可试详情页 URL）"),
                     "ok" if items else "warn")
+
+    def _cover_ready(self, url: str, pm) -> None:
+        """封面到货 → 回填所有引用同一张图的行。"""
+        rows = self._cover_rows.pop(url, [])
+        icon = QIcon(pm)
+        for r in rows:
+            if 0 <= r < self.table.rowCount():
+                item = self.table.item(r, 1)
+                if item is not None:
+                    item.setIcon(icon)
 
     def _preview_selected(self) -> None:
         row = self.table.currentRow()
@@ -496,6 +540,8 @@ class JiusePage(Page):
             thumb=it.get("cover") or None,
             # 点「在线播放」时后台解析直链（91 站多为 m3u8，面板会自动转封装后内嵌播）
             resolver=(lambda u=url: backend.resolve_direct(u)) if url else None,
+            # 九色解析只要 2 秒（一次 GET + 正则），放心在选中时就预解析
+            prefetch=bool(url),
         )
 
     def _toggle_all(self, state: int) -> None:

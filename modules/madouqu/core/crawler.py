@@ -15,8 +15,50 @@ import requests
 from datetime import datetime
 
 from .models import MagnetLink, VideoInfo, ModelInfo, CrawlResult
+from . import publish_page
 
 logger = logging.getLogger(__name__)
+
+# 演员（麻豆女郎）标签：详情页/列表页里都是 ``/video/tag/<名字>/``。
+# 站点会给绝对地址（有时还写成 madouqu.com 这个另一域名），所以只认路径，
+# 不认 host —— 否则换域名后一条都匹配不到。
+_ACTOR_TAG_RE = re.compile(
+    r'href="(?:https?://[^"/]+)?/video/tag/([^"/]+)/"[^>]*>(.*?)</a>', re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+# 详情页正文里的「麻豆女郎：XXX / 糖心片名：…」
+ACTRESS_LABEL_RE = re.compile(r"(?:麻豆女郎|女郎|演员)\s*[：:]\s*([^\s<]{1,24})")
+# 演员名单缓存：一页 660 位、抓一次 3~4 秒，没必要每次开页面都重抓
+ACTORS_CACHE = publish_page.state_file().parent / "actors.json"
+
+
+def save_actor_cloud(actors: List["ModelInfo"]) -> None:
+    """把演员名单落盘，供下次开页面秒开（顺手当离线备份）。"""
+    import json
+    try:
+        ACTORS_CACHE.write_text(json.dumps(
+            [{"name": m.name, "url": m.url, "video_count": m.video_count}
+             for m in actors], ensure_ascii=False), encoding="utf-8")
+    except OSError as e:  # noqa: BLE001
+        logger.warning(f"写演员缓存失败: {e}")
+
+
+def load_actor_cloud() -> List["ModelInfo"]:
+    """读上次缓存的演员名单（没有就返回空表）。"""
+    import json
+    try:
+        data = json.loads(ACTORS_CACHE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    out: List["ModelInfo"] = []
+    for it in data if isinstance(data, list) else []:
+        try:
+            out.append(ModelInfo(name=it.get("name") or "",
+                                 url=it.get("url") or "",
+                                 video_count=int(it.get("video_count") or 0)))
+        except Exception:  # noqa: BLE001
+            continue
+    return [m for m in out if m.name]
+
 
 
 class MadouquCrawler:
@@ -41,21 +83,17 @@ class MadouquCrawler:
         self.config = config or {}
         
         # 备用域名列表（当主域名失败时自动切换）
+        # 来源优先级：**发布页实测出来的表**（DATA/madouqu/mirrors.json）
+        #   → 静态兜底表。
         # 实测（2026-10-28）：
-        #   madouqu.com  直连 200 / 108KB / 1.3s  ← 只有这个真能用
-        #   madouqu.cc   代理 200 但正文仅 472B（空壳页），直连证书错误
-        #   madouqu.sbs  直连 CONNECT 失败、代理 TLS 失败（全挂）
-        # 所以 .com 必须排第一，其余保留仅作域名轮换时的兜底。
-        self.fallback_urls = [
-            'https://madouqu.com',
-            'https://madouqu.sbs',
-            'https://madouqu.club',
-            'https://madouqu.cc',
-            'https://madouqu.net',
-            'https://madouqu.org',
-        ]
+        #   madouqu.shop / madouqu2.sbs / madouqu2.shop / madouqu.com
+        #       直连 200 / ~107KB / 2~4s，且含 entry-title 卡片（真站点）  ← 都能用
+        #   madouqu.cc   代理 200 但正文仅 472B（空壳页）
+        #   madouqu.sbs  直连 CONNECT 失败、代理 TLS 失败（发布页早已换掉）
+        # 静态表仅作发布页全挂时的兜底，别再把死域名排前面。
+        self.fallback_urls = publish_page.fallback_urls()
 
-        self.base_url = self.config.get('base_url', 'https://madouqu.com')
+        self.base_url = self.config.get('base_url', 'https://madouqu.shop')
         
         # 网络配置
         self.timeout = self.config.get('timeout', 30)
@@ -146,8 +184,34 @@ class MadouquCrawler:
                     self.base_url = url
                     return url
         
+        # 内置表全挂 → 读发布页（chinaurl / bitbucket→fabuye.site/config.js）
+        # 拿最新域名再试一轮。这是「站点改址了程序自己跟上」的闭环，
+        # 不再需要人去界面上手填域名。
+        if self.config.get('auto_publish_refresh', True):
+            try:
+                logger.info("内置域名全部不可用，尝试读取发布页…")
+                res = publish_page.sync(timeout=min(self.timeout, 10), log=logger.info)
+                fresh = [u for u in (res.get('verified') or [])
+                         if u not in self.fallback_urls]
+                if res.get('verified'):
+                    self.fallback_urls = list(res['verified'])
+                for url in fresh:
+                    if self.test_url(url):
+                        logger.info(f"发布页找到可用域名: {url}")
+                        self.base_url = url
+                        return url
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"读取发布页失败: {e}")
+        
         logger.error("所有域名都不可用")
         return None
+
+    def refresh_from_publish_page(self, timeout: float = 10.0) -> Dict[str, Any]:
+        """手动触发：读发布页更新备用域名表（界面上「从发布页更新」按钮用）。"""
+        res = publish_page.sync(timeout=timeout)
+        if res.get('verified'):
+            self.fallback_urls = list(res['verified'])
+        return res
     
     def _setup_headers(self):
         """设置请求头"""
@@ -407,6 +471,11 @@ class MadouquCrawler:
                                 if detail.get('magnet_links'):
                                     video.magnet_links = detail['magnet_links']
                                     logger.info(f"  获取到 {len(video.magnet_links)} 个BT链接")
+                                # 顺便把「女郎」写进 model_name：原来这里是搜索关键词，
+                                # 导致库里「模特」永远是关键词而不是真正的演员。
+                                actors = detail.get('actors') or []
+                                if actors:
+                                    video.model_name = actors[0]
                                 time.sleep(self.request_delay * 0.5)  # 短暂延迟
                             except Exception as e:
                                 logger.warning(f"获取详情页失败: {e}")
@@ -619,12 +688,21 @@ class MadouquCrawler:
                     content = elem.get_text(strip=True)[:500]
                     if content:
                         break
-            
+
+            # 提取演员（女郎）：详情页正文里正好一条 /video/tag/<名字>/ 链接，
+            # 比「麻豆女郎：XXX」这种纯文本更可靠（后者常常是空的）。
+            actors = [name for name, _href in self.parse_actor_tags(html)]
+            if not actors:
+                m_actor = ACTRESS_LABEL_RE.search(content)
+                if m_actor:
+                    actors = [m_actor.group(1).strip()]
+
             return {
                 'url': url,
                 'title': title,
                 'magnet_links': [m.to_dict() for m in magnet_links],
                 'content': content,
+                'actors': actors,
             }
             
         except requests.exceptions.HTTPError as e:
@@ -689,6 +767,118 @@ class MadouquCrawler:
             last_crawled=datetime.now().isoformat(),
         )
     
+    # ------------------------------------------------------------ 演员（麻豆女郎）
+    def parse_actor_tags(self, html: str) -> List[tuple]:
+        """从任意页面抽「女郎」标签 ``/video/tag/<名字>/`` → [(名字, 绝对URL)]。
+
+        站点的女郎标签有时写成 ``https://madouqu.com/video/tag/x/``（另一个域名），
+        这里统一改写成当前 base_url，避免拿着过期域名去请求。
+        """
+        out: List[tuple] = []
+        seen = set()
+        for slug, inner in _ACTOR_TAG_RE.findall(html or ""):
+            name = _TAG_RE.sub("", inner or "").strip() or urllib.parse.unquote(slug)
+            name = name.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append((name, f"{self.base_url}/video/tag/{slug}/"))
+        return out
+
+    def fetch_actor_cloud(self, max_pages: int = 1, progress=None) -> List[ModelInfo]:
+        """抓「麻豆女郎」演员名单。
+
+        做法照搬糖心 ``fetch_actor_cloud``（抓索引页 → 去重 → 计数）：
+          * 索引页是 ``/tags/``（站点导航里的「麻豆女郎」）；
+          * 实测 2026-10-28：一页就给出 **660 位**女郎（2.9s），而
+            ``/tags/page/2/`` 返回的是同一份内容（站点没有真分页），
+            所以默认只抓 1 页；多抓纯属浪费流量。
+        """
+        if progress:
+            progress(f"正在抓取麻豆女郎: {self.base_url}/tags/")
+        seen: Dict[str, ModelInfo] = {}
+        for page in range(1, max(1, max_pages) + 1):
+            if page == 1:
+                url = f"{self.base_url}/tags/"
+            else:
+                url = f"{self.base_url}/tags/page/{page}/"
+            try:
+                html = self._request(url)
+            except Exception as e:  # noqa: BLE001
+                if progress:
+                    progress(f"  [警告] {url} 失败: {e}")
+                break
+            if not html:
+                break
+            added = 0
+            for name, href in self.parse_actor_tags(html):
+                if name in seen:
+                    seen[name].video_count += 1
+                    continue
+                seen[name] = ModelInfo(
+                    name=name, url=href, video_count=1,
+                    last_crawled=datetime.now().isoformat())
+                added += 1
+            if progress:
+                progress(f"  第 {page} 页：新增 {added} 位（累计 {len(seen)}）")
+            if added == 0:
+                break
+            time.sleep(min(self.request_delay, 0.5))
+
+        actors = sorted(seen.values(), key=lambda m: (-m.video_count, m.name))
+        if actors:
+            save_actor_cloud(actors)
+        if progress:
+            progress(f"麻豆女郎抓取完成，共 {len(actors)} 位")
+        return actors
+
+    def fetch_actor_videos(self, actor_name: str, max_pages: int = 3,
+                           progress=None) -> CrawlResult:
+        """按女郎名抓她的作品列表（走 ``/video/tag/<名字>/``，比拼搜索更准）。"""
+        start = datetime.now()
+        videos: List[VideoInfo] = []
+        seen_urls = set()
+        slug = urllib.parse.quote(actor_name, safe='')
+        for page in range(1, max(1, max_pages) + 1):
+            if page == 1:
+                url = f"{self.base_url}/video/tag/{slug}/"
+            else:
+                url = f"{self.base_url}/video/tag/{slug}/page/{page}/"
+            try:
+                html = self._request(url)
+            except Exception as e:  # noqa: BLE001
+                if progress:
+                    progress(f"  [警告] {url} 失败: {e}")
+                break
+            if not html:
+                break
+            soup = BeautifulSoup(html, 'html.parser')
+            page_items = self._parse_search_results(soup, actor_name)
+            added = 0
+            for v in page_items:
+                if v.detail_url and v.detail_url in seen_urls:
+                    continue
+                if v.detail_url:
+                    seen_urls.add(v.detail_url)
+                v.model_name = actor_name
+                videos.append(v)
+                added += 1
+            if progress:
+                progress(f"  {actor_name} 第 {page} 页：{added} 条")
+            if added == 0:
+                break
+            time.sleep(min(self.request_delay, 0.8))
+
+        return CrawlResult(
+            model_name=actor_name,
+            videos=videos,
+            total_magnets=sum(len(v.magnet_links) for v in videos),
+            pages_crawled=page,
+            duration_seconds=round((datetime.now() - start).total_seconds(), 2),
+            success=bool(videos),
+            error_message=None if videos else "该女郎没有抓到作品（页面结构可能又变了）",
+        )
+
     def close(self):
         """关闭爬虫"""
         self._close_selenium()

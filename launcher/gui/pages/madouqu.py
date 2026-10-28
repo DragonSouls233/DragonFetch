@@ -7,13 +7,18 @@
 把它塞进「多站点」只会让那页的语义变模糊。所以它有自己的页面、自己的
 ``DATA/madouqu`` 目录、自己的入口。
 
-⚠️ 实测记录（2026-10，本机）：内置的 5 个备用域名（madouqu.sbs / .club /
-.cc / .net / .org）经 socks5h 代理访问全部失败（502 隧道错误 / 读超时），
-直连亦不可达。因此本页在域名失效时**不会假装可用**：点「检测域名」或
-「搜索」都会把失败原因写进日志。拿到新域名后填进「域名」框即可继续用。
+⚠️ 地址（实测 2026-10-28）
+-------------------------
+站点导航自己挂着两个发布页：
+``https://chinaurl.github.io/``（备用）与
+``https://bitbucket.org/fabuye/madouqu/``（永久）。两者最终都指向
+``https://fabuye.site``，真实域名表在 ``/config.js`` 里（明文 JS，含「麻豆区」分组）。
+「从发布页更新」就是读这条链路 + 直连校验；内置静态表只作兜底
+（.sbs/.club/.cc/.net/.org 实测多数已 TLS 失败）。
 
 界面：
-  域名 [........] [检测域名] [自动找可用域名]  页数 [N]   [关键词......] [搜索]
+  域名 [........] [检测域名] [自动找可用域名] [从发布页更新]  页数 [N]
+  关键词 [.........] [搜索]  演员 [下拉] [加载演员]  演员：N 位
   ┌ 结果表：选择 | 标题 | 大小 | 日期 | 磁力数 | 详情页
   [全选] [复制磁力] [导出CSV] [打开详情] [入库]
   ┌ 日志
@@ -28,8 +33,8 @@ import time
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ...core import backend, paths
@@ -45,7 +50,7 @@ WIDTHS = [58, 480, 110, 110, 80, 300]
 class MadouquPage(Page):
     key = "madouqu"
     title = "麻豆磁力"
-    subtitle = "独立模块：抓取 madouqu 的 BT 磁力（站点换域名后，把新域名填进「域名」再点检测）"
+    subtitle = "独立模块：按女郎/关键词抓 madouqu 的 BT 磁力（换域名点「从发布页更新」）"
 
     # ---------------------------------------------------------------- 构建
     def build(self) -> None:
@@ -79,6 +84,13 @@ class MadouquPage(Page):
         self.btn_find = QPushButton("自动找可用域名")
         self.btn_find.setObjectName("Ghost")
         self.btn_find.clicked.connect(self.find_domain)
+        # 发布页（chinaurl.github.io / bitbucket.org/fabuye/madouqu）：站点换域名时
+        # 它是唯一权威来源，比在死域名表里轮询可靠得多。
+        self.btn_publish = QPushButton("从发布页更新")
+        self.btn_publish.setObjectName("Ghost")
+        self.btn_publish.setToolTip("读取麻豆官方发布页（chinaurl / bitbucket → fabuye.site/config.js）"
+                                    "拿最新域名，并用直连逐个校验")
+        self.btn_publish.clicked.connect(self.sync_publish)
         self.sp_pages = QSpinBox()
         self.sp_pages.setRange(1, 30)
         self.sp_pages.setValue(int(settings().get("madouqu.max_pages", 5) or 5))
@@ -89,6 +101,7 @@ class MadouquPage(Page):
         row1.addWidget(self.ed_base, 1)
         row1.addWidget(self.btn_test)
         row1.addWidget(self.btn_find)
+        row1.addWidget(self.btn_publish)
         row1.addWidget(self.sp_pages)
         row1.addWidget(self.lbl_status, 1)
         cl.addLayout(row1)
@@ -101,8 +114,25 @@ class MadouquPage(Page):
         self.btn_search = QPushButton("搜索")
         self.btn_search.setObjectName("Primary")
         self.btn_search.clicked.connect(self.do_search)
+        # 演员（麻豆女郎）：从站点 /tags/ 自动抓名单，选中即按女郎搜她的作品。
+        # 糖心的「演员云」是同一个思路（抓索引页 → 去重 → 计数），麻豆这边的
+        # 索引页就是 /tags/，实测一页 660 位、3~4 秒。
+        self.cmb_actor = QComboBox()
+        self.cmb_actor.setEditable(True)
+        self.cmb_actor.setMinimumWidth(150)
+        self.cmb_actor.setPlaceholderText("演员（麻豆女郎）")
+        self.cmb_actor.lineEdit().setPlaceholderText("演员（麻豆女郎）")
+        self.cmb_actor.activated.connect(self._actor_picked)
+        self.btn_actors = QPushButton("加载演员")
+        self.btn_actors.setObjectName("Ghost")
+        self.btn_actors.clicked.connect(lambda: self.load_actors(force=True))
+        self.lbl_actors = QLabel("演员：-")
+        self.lbl_actors.setObjectName("Muted")
         row2.addWidget(self.ed_kw, 1)
         row2.addWidget(self.btn_search)
+        row2.addWidget(self.cmb_actor)
+        row2.addWidget(self.btn_actors)
+        row2.addWidget(self.lbl_actors)
         cl.addLayout(row2)
         return card
 
@@ -159,6 +189,12 @@ class MadouquPage(Page):
     # ---------------------------------------------------------------- 生命周期
     def on_show(self) -> None:
         self.refresh_stats()
+        # 首次进页面就把演员表填上（先读缓存秒开，没有缓存再后台抓）。
+        # 缺了它，页面只剩一个空关键词框，用户会以为「没内容」。
+        if not getattr(self, "_actors_loaded", False):
+            self._actors_loaded = True
+            if not self.load_actors(force=False):
+                self.load_actors(force=True)
 
     def refresh_stats(self) -> None:
         try:
@@ -170,6 +206,142 @@ class MadouquPage(Page):
                 f"（{paths.rel(paths.data_dir('madouqu'))}）")
         except Exception as exc:  # noqa: BLE001
             self.lbl_stats.setText(f"库统计不可用：{exc}")
+
+    # ---------------------------------------------------------------- 发布页
+    def sync_publish(self) -> None:
+        """读发布页拿最新域名（直连校验通过才落地）。"""
+        self._set_busy(True, "读取发布页…")
+        self.log.append("info", "读取发布页：chinaurl.github.io / bitbucket.org/fabuye/madouqu")
+
+        def _run(progress=None):
+            c = backend.madouqu_crawler()
+            try:
+                return c.refresh_from_publish_page(timeout=10)
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+        task = Task(_run)
+        task.done.connect(self._publish_done)
+        task.failed.connect(self._failed)
+        CENTER.start(task)
+
+    def _publish_done(self, res: dict) -> None:
+        res = res or {}
+        verified = [u for u in (res.get("verified") or []) if u]
+        self._set_busy(False, f"发布页：{len(verified)} 个可用")
+        for u in verified:
+            self.log.append("ok", f"可用域名：{u}")
+        for u in (res.get("dead") or []):
+            self.log.append("warn", f"剔除：{u}")
+        if res.get("config_used"):
+            self.log.append("info", f"域名表：{res['config_used']}")
+        for e in (res.get("errors") or [])[:4]:
+            self.log.append("warn", e)
+        if verified:
+            cur = verified[0]
+            self.ed_base.setText(cur)
+            settings().set("madouqu.base_url", cur)
+            settings().save()
+            self.notify(f"发布页：{len(verified)} 个可用域名", "ok")
+        else:
+            self.notify("发布页没拿到可用域名（检查网络/代理）", "err")
+
+    # ---------------------------------------------------------------- 演员
+    def load_actors(self, force: bool = False) -> bool:
+        """填演员下拉框。force=False 时先读缓存，缓存为空返回 False（不联网）。"""
+        try:
+            crawler_mod = backend.madouqu().crawler
+        except Exception:  # noqa: BLE001
+            return False
+        if not force:
+            actors = crawler_mod.load_actor_cloud()
+            if not actors:
+                return False
+            self._fill_actors(actors)
+            return True
+
+        self.btn_actors.setEnabled(False)
+        self.lbl_actors.setText("演员：抓取中…")
+        base = self.ed_base.text().strip()
+
+        def _run(progress=None):
+            c = backend.madouqu_crawler()
+            if base:
+                c.set_base_url(base)
+            try:
+                return c.fetch_actor_cloud(progress=progress)
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+        task = Task(_run, want_progress=True)
+        task.progress.connect(lambda p, t: self.lbl_actors.setText(f"演员：{t or ''}"))
+        task.done.connect(self._actors_done)
+        task.failed.connect(self._actors_fail)
+        CENTER.start(task)
+        return True
+
+    def _fill_actors(self, actors) -> None:
+        self.cmb_actor.clear()
+        for a in actors:
+            self.cmb_actor.addItem(getattr(a, "name", "") or "",
+                                   getattr(a, "url", "") or "")
+        self.lbl_actors.setText(f"演员：{len(actors)} 位")
+        self.cmb_actor.setCurrentIndex(-1)
+        self.cmb_actor.setEditText("")
+
+    def _actors_done(self, actors) -> None:
+        self.btn_actors.setEnabled(True)
+        actors = list(actors or [])
+        self._fill_actors(actors)
+        self.log.append("ok" if actors else "warn",
+                        f"演员名单：{len(actors)} 位"
+                        if actors else "演员名单抓取失败（页面结构可能变了）")
+        self.notify(f"演员名单：{len(actors)} 位", "ok" if actors else "warn")
+
+    def _actors_fail(self, tb: str) -> None:
+        self.btn_actors.setEnabled(True)
+        self.lbl_actors.setText("演员：抓取失败")
+        last = (tb or "").strip().splitlines()[-1] if tb else "未知错误"
+        self.log.append("err", f"演员名单失败：{last[:160]}")
+
+    def _actor_picked(self, index: int) -> None:
+        """选中某位女郎 → 走她的标签页（比站内搜索准）。
+
+        实测 2026-10-28：站内搜索 ``?s=91兔兔`` 返回 0 条，而
+        ``/video/tag/91兔兔/`` 有 12 条 —— 站点搜索没有把女郎名建进索引，
+        所以"按演员找片"必须走标签页，不能复用关键词搜索。
+        """
+        name = self.cmb_actor.itemText(index).strip()
+        if not name:
+            return
+        self.ed_kw.setText(name)
+        base = self.ed_base.text().strip()
+        pages = int(self.sp_pages.value())
+        self._set_busy(True, f"抓取「{name}」的作品…")
+        self.log.append("info", f"女郎「{name}」：抓标签页（{pages} 页）")
+
+        def _run(progress=None):
+            c = backend.madouqu_crawler()
+            if base:
+                c.set_base_url(base)
+            try:
+                return c.fetch_actor_videos(name, max_pages=pages, progress=progress)
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+        task = Task(_run, want_progress=True)
+        task.done.connect(self._search_done)
+        task.failed.connect(self._failed)
+        CENTER.start(task)
 
     # ---------------------------------------------------------------- 域名
     def test_domain(self) -> None:
@@ -427,7 +599,7 @@ class MadouquPage(Page):
         self.notify(last[:160], "err")
 
     def _set_busy(self, busy: bool, text: str = "") -> None:
-        for b in (self.btn_search, self.btn_test, self.btn_find):
+        for b in (self.btn_search, self.btn_test, self.btn_find, self.btn_publish):
             b.setEnabled(not busy)
         if text:
             self.lbl_status.setText(text)

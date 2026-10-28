@@ -10,7 +10,7 @@ import hashlib
 import os
 import re
 
-from PyQt6.QtCore import QSize, Qt, QUrl
+from PyQt6.QtCore import QSize, Qt, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PyQt6.QtWidgets import (
@@ -27,8 +27,10 @@ except Exception:  # pragma: no cover
 
 _VIDEO_EXT = (".mp4", ".mkv", ".webm", ".flv", ".mov", ".avi", ".m4v", ".ts")
 
-# 内嵌预览 HLS 时只截前面这么多秒，避免为了"看一眼"把整片拉下来
-_HLS_PREVIEW_SECONDS = 60
+# 内嵌预览 HLS 时只截前面这么多秒：既要在 8 秒内出画面，又要够看几眼。
+# 实测（2026-10-28，本机 ~1.1MB/s）：-t 10 ≈ 4.1s、-t 20 ≈ 5.6s、-t 60 ≈ 8s+。
+# 所以取 12 秒 —— 加上解析（九色快路 2.6s）总时长仍能压到 8 秒内。
+_HLS_PREVIEW_SECONDS = 12
 
 
 def _is_hls(s: str) -> bool:
@@ -71,6 +73,18 @@ class PreviewPane(QFrame):
         self._resolver = None        # 页面注入的直链解析回调
         self._resolve_task = None    # 解析任务引用（防 QThread 被 GC 导致 abort）
         self._hls_task = None        # HLS 转封装任务引用
+        self._hls_src = None         # 正在尝试"原生播放"的 m3u8
+        # 预解析：选中条目就后台把直链解析出来，用户点「在线播放」时几乎零等待
+        self._pf_token = 0           # 当前预览条目的令牌
+        self._pf_done: tuple[int, str] | None = None   # (令牌, 直链)
+        self._pf_task = None
+        self._pf_token_running = 0   # 正在预解析的令牌（0 = 没有在跑）
+        self._pf_click_pending = False   # 用户在解析期间就点了「在线播放」
+        self._warmup_task = None
+        # 原生 HLS 起播看门狗：超时还没出画面就退回 ffmpeg 转封装
+        self._hls_watch = QTimer(self)
+        self._hls_watch.setSingleShot(True)
+        self._hls_watch.timeout.connect(self._hls_fallback)
         self._net = QNetworkAccessManager(self)
         self._net.finished.connect(self._on_image)
 
@@ -146,11 +160,15 @@ class PreviewPane(QFrame):
     def preview(self, title: str = "", thumb: str | None = None,
                 video: str | None = None, local_dir: str | None = None,
                 local_hint: str | None = None,
-                resolver=None) -> None:
+                resolver=None, prefetch: bool = False) -> None:
         """显示一条内容。
 
         resolver: 可选 ``() -> str|None``，点击「在线播放」时在后台调用，
         返回可播放的直链（远程 URL 或本地路径）。用于"还没下载也想看"的场景。
+
+        prefetch: 选中条目就先在后台解析一次直链（点播放时几乎零等待）。
+        只有**解析便宜**的页面才该开（九色一次 GET 2 秒）；像多站点那种要跑
+        yt-dlp 的，乱预解析等于每次划过列表都发一次 8 秒请求，反而拖慢。
         """
         self.lbl_title.setText(title or "（未命名）")
         self.show_thumbnail(thumb)
@@ -158,6 +176,14 @@ class PreviewPane(QFrame):
         self.btn_online.setVisible(self._resolver is not None)
         self.btn_online.setEnabled(True)
         self.btn_online.setText("在线播放")
+        # 换条目 → 令牌自增，旧的预解析结果作废
+        self._pf_token += 1
+        self._pf_done = None
+        self._pf_click_pending = False
+        if self._resolver is not None and prefetch:
+            # 选中就预解析：把"解析"那 2~3 秒提前花掉，点播放时只剩起播。
+            # 延迟 400ms 是为了避开"快速划过列表"时的空跑。
+            QTimer.singleShot(400, self._prefetch)
         src: str | None = None
         if local_dir and local_hint:
             src = _find_local(local_dir, local_hint)
@@ -165,9 +191,75 @@ class PreviewPane(QFrame):
             src = video
         self.play(src)
 
+    # ----------------------------------------------------------- 预解析
+    def _prefetch(self) -> None:
+        """后台先把直链解析好（失败静默，不影响用户点按钮）。"""
+        resolver = getattr(self, "_resolver", None)
+        if not callable(resolver):
+            return
+        token = self._pf_token
+
+        def _run():
+            return resolver()
+
+        from ..core.tasks import CENTER, Task
+
+        task = Task(_run)
+        task.done.connect(lambda url, t=token: self._on_prefetched(t, url))
+        task.failed.connect(lambda tb, t=token: self._pf_failed(t))
+        self._pf_task = task
+        self._pf_token_running = token
+        CENTER.start(task)
+
+    def _on_prefetched(self, token: int, url) -> None:
+        self._pf_task = None
+        self._pf_token_running = 0
+        if token != self._pf_token or not url:
+            return
+        self._pf_done = (token, str(url))
+        # 解析出来之后再预热（顺序很重要）：先把直链交给「在线播放」按钮，
+        # 用户点下去就能起播；预热在后台继续跑，只是为了把 DNS/TLS 提前建好。
+        if _is_hls(self._pf_done[1]):
+            from ..core import backend as _bk
+            from ..core.tasks import CENTER, Task as _Task
+
+            try:
+                t = _Task(lambda u=str(url): _bk.warmup_hls(u))
+                self._warmup_task = t
+                CENTER.start(t)
+            except Exception:  # noqa: BLE001
+                self._warmup_task = None
+        # 用户在解析期间就点了「在线播放」→ 现在直接起播
+        if self._pf_click_pending:
+            self._pf_click_pending = False
+            self.btn_online.setEnabled(True)
+            self.btn_online.setText("在线播放")
+            self.play(str(url))
+
+    def _pf_failed(self, token: int) -> None:
+        self._pf_task = None
+        self._pf_token_running = 0
+        if self._pf_click_pending and token == self._pf_token:
+            # 预解析失败 → 退回"点按钮再解析一次"的常规路径
+            self._pf_click_pending = False
+            self._resolve_and_play()
+
     # ----------------------------------------------------------- 在线解析播放
     def _resolve_and_play(self) -> None:
         if not callable(getattr(self, "_resolver", None)):
+            return
+        # 预解析已经拿到直链 → 直接起播（用户感知就是"点了就有"）
+        pf = getattr(self, "_pf_done", None)
+        if pf and pf[0] == self._pf_token and pf[1]:
+            self.btn_online.setText("在线播放")
+            self.play(pf[1])
+            return
+        # 预解析还在跑 → 等它的结果，别再发一次重复请求（否则解析两遍，
+        # 首帧时间直接翻倍，实测会从 4.8s 掉到 8.5s）
+        if self._pf_task is not None and self._pf_token_running == self._pf_token:
+            self._pf_click_pending = True
+            self.btn_online.setEnabled(False)
+            self.btn_online.setText("解析中…")
             return
         self.btn_online.setEnabled(False)
         self.btn_online.setText("解析中…")
@@ -242,19 +334,41 @@ class PreviewPane(QFrame):
 
     def play(self, url_or_path: str | None) -> None:
         self._last_src = url_or_path
+        self._hls_watch.stop()
+        self._hls_src = None
         if not _HAS_MM or self._player is None:
             return
         if not url_or_path:
             self._player.stop()
             return
-        # Windows 的 QtMultimedia(WMF) 不支持 HLS(m3u8)，直接 setSource 会静默失败
-        # （面板全黑、看起来像"没反应"）。这里先用 ffmpeg 截前 60 秒转封装成本地 mp4
-        # 再内嵌播，实测 5.7s / 26MB，足够当"预览"。
+        # HLS(m3u8) 曾经在 Windows 上播不了（QtMultimedia 走 WMF 时确像"黑屏没反应"），
+        # 于是老做法是先用 ffmpeg 截 60 秒转封装成 mp4 再播 —— 代价是点一下要等 6~9 秒。
+        # 实测 2026-10-28：本机 Qt 6.11 的 QtMultimedia **已经用 FFmpeg 后端**
+        # （播放时能直接看到 ffmpeg 的 hls 日志），m3u8 原生起播 **3.5 秒**就出画面，
+        # 比转封装快一倍多。所以改成：**先原生播**，看门狗超时 / 播放器报错
+        # 才退回转封装 —— 快路径优先，慢路径兜底。
         if _is_hls(url_or_path):
-            self._prepare_hls(url_or_path)
+            self._play_hls(url_or_path)
             return
         self._player.setSource(_to_url(url_or_path))
         self._player.play()
+
+    def _play_hls(self, url: str) -> None:
+        """先试原生 HLS；6 秒内没出画面就转封装兜底。"""
+        self._hls_src = url
+        self._player.setSource(_to_url(url))
+        self._player.play()
+        self._hls_watch.start(6000)
+
+    def _hls_fallback(self) -> None:
+        """原生播放超时（老环境/解码器不支持）→ 走 ffmpeg 截一小段转封装。"""
+        src = self._hls_src
+        self._hls_src = None
+        if not src or self._player is None:
+            return
+        if self._player.position() > 0:
+            return
+        self._prepare_hls(src)
 
     def _prepare_hls(self, url: str) -> None:
         """把 m3u8 截前 N 秒转成缓存 mp4，然后内嵌播放。"""
@@ -328,6 +442,12 @@ class PreviewPane(QFrame):
 
     # ----------------------------------------------------------- 播放器回调
     def _on_player_error(self, _err, _msg: str = "") -> None:
+        # 原生 HLS 报错 → 立刻走转封装兜底，别让面板停在黑屏
+        if self._hls_src:
+            src, self._hls_src = self._hls_src, None
+            self._hls_watch.stop()
+            self._prepare_hls(src)
+            return
         if self._player is not None:
             self._player.stop()
 

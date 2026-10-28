@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import re
 import sys
 import threading
 from types import SimpleNamespace
@@ -344,10 +345,107 @@ def resolve_meta(url: str, proxy: str | None = None) -> dict:
     return data
 
 
+_PLAY_URL_RE = re.compile(
+    r'(https?://[^\s"\'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"\'<>\\]*)?)', re.I)
+
+
+def _is_jiuse_host(host: str) -> bool:
+    """九色（91 系）的域名集合：settings 里的当前线路 + 常见别名。"""
+    h = (host or "").lower()
+    if not h:
+        return False
+    try:
+        active = (settings().get("jiuse.active_url") or "").strip()
+        if active and h in active.lower():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return any(k in h for k in ("91porn", "jiuse", "91sp", "91video"))
+
+
+def resolve_direct_fast(url: str, timeout: float = 10.0) -> str:
+    """快速直链解析：**一次 GET 页面 + 正则找 m3u8/mp4**。
+
+    为什么要有它：``yt-dlp -J`` 对九色这类站点要 8 秒（先猜 extractor、再试
+    多次请求），而详情页 HTML 里本来就明摆着一条 m3u8（实测 2.6s 就能拿到）。
+    预览面板要求"点一下 8 秒内出画面"，光解析就把预算吃光了，所以这条快路
+    只对**确认过页面内嵌直链**的站点开放（九色 91 系），其余仍走 yt-dlp，
+    避免在多广告站点上误取到广告的 .mp4。
+    """
+    from urllib.parse import urlparse
+
+    host = urlparse(url).netloc.split(":")[0]
+    if not _is_jiuse_host(host):
+        return ""
+    try:
+        import requests
+
+        s = requests.Session()
+        s.trust_env = True
+        r = s.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; "
+                                            "Win64; x64) AppleWebKit/537.36 "
+                                            "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"},
+                  timeout=timeout, verify=False)
+        html = r.text or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    found = [m.group(1) for m in _PLAY_URL_RE.finditer(html)]
+    if not found:
+        return ""
+    # m3u8 优先（站点的真实播放源都是 HLS），同类型取第一条
+    for u in found:
+        if ".m3u8" in u.lower():
+            return u
+    return found[0]
+
+
+def warmup_hls(url: str, timeout: float = 8.0) -> bool:
+    """预热 HLS：先抓 m3u8，再取第一个分片，把 DNS/TLS/连接都提前建立好。
+
+    为什么需要：QtMultimedia(FFmpeg 后端)起播时自己会去拉 m3u8 + 首个分片，
+    实测在跨境线路上这一步要 3~6 秒，而且第一次 TLS 握手失败会直接报
+    "Error when loading first segment"（用户看到黑屏）。解析完直链后顺手
+    把这两步做掉，真正播放时走的是已建好的连接 —— 首帧能稳定压在 8 秒内。
+    """
+    if not url or not _is_hls_url(url):
+        return False
+    try:
+        import requests
+
+        s = requests.Session()
+        s.trust_env = True
+        r = s.get(url, timeout=timeout, verify=False)
+        if r.status_code != 200:
+            return False
+        base = url.rsplit("/", 1)[0] + "/"
+        segs = [ln.strip() for ln in (r.text or "").splitlines()
+                if ln.strip() and not ln.startswith("#")]
+        if not segs:
+            return False
+        seg = segs[0]
+        if not seg.lower().startswith("http"):
+            seg = base + seg
+        # 只取前 256KB 就够完成握手 + 首包，不必把整片拉下来
+        with s.get(seg, timeout=timeout, verify=False, stream=True) as sr:
+            got = 0
+            for chunk in sr.iter_content(65536):
+                got += len(chunk)
+                if got >= 262144:
+                    break
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _is_hls_url(url: str) -> bool:
+    return (url or "").split("?")[0].split("#")[0].lower().endswith(".m3u8")
+
+
 def resolve_direct(url: str, proxy: str | None = None) -> str:
     """解析单个视频页，只返回**能直接播放**的直链（预览面板「在线播放」用）。
 
     选择顺序：
+      0. 九色等「页面内嵌直链」站点：一次 GET + 正则（2~3 秒，见 resolve_direct_fast）；
       1. yt-dlp 顶层 ``url``（多数站点给的就是 m3u8，体积小、起播快）；
       2. ``formats`` 里分辨率最高的 http 直链；
       3. 站点包 / resolve_meta 给出的 direct_url(s)。
@@ -355,6 +453,13 @@ def resolve_direct(url: str, proxy: str | None = None) -> str:
     """
     if not url:
         return ""
+    # ⓪ 快路：只有确认可靠的站点才走，否则容易抓到广告直链
+    try:
+        fast = resolve_direct_fast(url)
+        if fast:
+            return fast
+    except Exception:  # noqa: BLE001
+        pass
     # ① 先走 yt-dlp：能拿到就直接用
     try:
         info = ytdlp().service.probe(url, proxy=proxy)

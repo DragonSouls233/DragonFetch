@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Iterable, List, Sequence
 
-from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont
+from PyQt6.QtCore import QObject, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QFont, QPixmap
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPlainTextEdit, QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem,
@@ -269,3 +271,127 @@ def open_path(path: str) -> bool:
     if os.path.exists(p):
         return QDesktopServices.openUrl(QUrl.fromLocalFile(p))
     return False
+
+
+# ------------------------------------------------------------------ 封面缩略
+class CoverLoader(QObject):
+    """列表封面异步加载器（线程池 + requests，绝不阻塞 UI）。
+
+    为什么要单独一个类：九色列表 29 条、糖心演员云 600+ 条，同步拉图会把界面
+    卡住十几秒；而单靠 QNetworkAccessManager 又受"同一域名 6 条连接"限制
+    （实测 4 条 lane 仍要 38 秒才把 29 张拉完）。这里改用 8 线程的 requests
+    池：单张实测 1.3~5.6s，一批 29 张 5~8 秒就齐了，且走系统代理（图床多在墙外）。
+    """
+
+    loaded = pyqtSignal(str, QPixmap)     # url, 已缩放好的 pixmap
+
+    #: 同时拉图的线程数。再大对图床也不礼貌，收益很低
+    WORKERS = 10
+
+    def __init__(self, parent=None, size: QSize | None = None, lanes: int = 4):
+        super().__init__(parent)
+        self._size = size or QSize(128, 72)
+        self._cache: dict[str, QPixmap] = {}
+        self._pending: set[str] = set()
+        self._pool = None
+        self._referer = ""
+
+    # ------------------------------------------------------------ 对外
+    @property
+    def icon_size(self) -> QSize:
+        return self._size
+
+    def set_referer(self, referer: str) -> None:
+        """图床多防盗链，带上站点 Referer 才给图。"""
+        self._referer = (referer or "").strip()
+
+    def cached(self, url: str) -> QPixmap | None:
+        return self._cache.get(url or "")
+
+    def load(self, url: str) -> QPixmap | None:
+        """返回已缓存的图；没缓存就丢进线程池，返回 None。"""
+        if not url:
+            return None
+        pm = self._cache.get(url)
+        if pm is not None:
+            return pm
+        if url in self._pending:
+            return None
+        self._pending.add(url)
+        if self._pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._pool = ThreadPoolExecutor(max_workers=self.WORKERS,
+                                            thread_name_prefix="cover")
+        self._pool.submit(self._fetch, url)
+        return None
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._pending.clear()
+
+    # ------------------------------------------------------------ 内部
+    @staticmethod
+    def _cache_file(url: str) -> Path:
+        """封面磁盘缓存路径（同一张图第二次打开列表就不再压图床）。"""
+        import hashlib
+
+        root = os.environ.get("DF_DATA_ROOT") or ""
+        if root:
+            base = Path(root)
+        else:
+            try:
+                from ..core import paths as _paths
+
+                base = _paths.DATA
+            except Exception:  # noqa: BLE001
+                base = Path(".")
+        key = hashlib.md5(url.encode("utf-8", "ignore")).hexdigest()[:20]
+        return base / "app" / "cover_cache" / f"{key}.jpg"
+
+    def _fetch(self, url: str) -> None:
+        data = b""
+        cf = self._cache_file(url)
+        try:
+            if cf.is_file() and cf.stat().st_size > 512:
+                data = cf.read_bytes()
+        except OSError:
+            data = b""
+        if not data:
+            try:
+                import requests
+                import urllib3
+
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/122.0.0.0 Safari/537.36",
+                    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                }
+                if self._referer:
+                    headers["Referer"] = self._referer
+                s = requests.Session()
+                s.trust_env = True          # 图床多在墙外，跟随系统代理
+                r = s.get(url, headers=headers, timeout=12, verify=False)
+                if r.status_code == 200:
+                    data = r.content or b""
+            except Exception:  # noqa: BLE001
+                data = b""
+            if data:
+                try:
+                    cf.parent.mkdir(parents=True, exist_ok=True)
+                    cf.write_bytes(data)
+                except OSError:
+                    pass
+        self._pending.discard(url)
+        if not data:
+            return
+        pm = QPixmap()
+        if not pm.loadFromData(data):
+            return
+        scaled = pm.scaled(self._size,
+                           Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                           Qt.TransformationMode.SmoothTransformation)
+        self._cache[url] = scaled
+        self.loaded.emit(url, scaled)    # 跨线程信号 → Qt 自动排队回主线程

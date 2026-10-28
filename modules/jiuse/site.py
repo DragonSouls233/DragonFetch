@@ -34,7 +34,7 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 #   ① <a class="display" href="/vod/view/XXX">  内含 <div class="img" style="background-image:url(...)">
 #   ② <a class="title" href="/vod/view/XXX">标题</a>
 #   ③ <small class="layer">00:03:45</small>
-#   ④ 作者: <a href="/dashen/XXX">
+#   ④ 作者: <a href="/dashen/XXX">  **或**  <a href="/author/XXX">（站点两种写法混用）
 # 注意封面**不是 <img>**，而是 background-image，所以原来基于 <img> 的取法必然全空。
 _ELEM_SPLIT_RE = re.compile(r'<div class="video-elem">', re.I)
 _BG_URL_RE = re.compile(
@@ -46,7 +46,10 @@ _ANY_A_RE = re.compile(
     r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
 _DUR_RE = re.compile(r'<small[^>]+class="[^"]*\blayer\b[^"]*"[^>]*>(.*?)</small>',
                      re.I | re.S)
-_AUTHOR_RE = re.compile(r'href=["\']/dashen/([^"\']+)["\']', re.I)
+# 作者只认 /dashen/ 会漏掉一半卡片（实测首页 24 条里 12 条是 /author/），
+# 于是「演员/作者」列永远是空的 —— 这就是九色"拿不到演员"的根因。
+_AUTHOR_RE = re.compile(
+    r'href=["\']/(?:dashen|author|u)/([^"\'/]+)["\'][^>]*>(.*?)</a>', re.I | re.S)
 
 
 def _abs(base: str, href: str) -> str:
@@ -112,7 +115,9 @@ def _parse_cards(html: str, base_url: str) -> List[dict]:
         author = ""
         ma = _AUTHOR_RE.search(seg)
         if ma:
-            author = ma.group(1)
+            # 优先用链接文字（站点有时 slug 是拼音、文字才是中文名）
+            author = re.sub(r"\s+", " ", _TAG_RE.sub("", ma.group(2) or "")).strip() \
+                or (ma.group(1) or "").strip()
         if not title:
             title = url.rstrip("/").split("/")[-1]
         out.append({"title": title[:120], "url": url, "cover": cover,

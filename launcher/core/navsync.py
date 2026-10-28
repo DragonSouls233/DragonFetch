@@ -406,15 +406,33 @@ def _sync_madouqu(timeout: float, progress=None) -> Dict[str, Any]:
     cands: List[str] = []
     if cur:
         cands.append(cur)
+    # 发布页优先：chinaurl.github.io / bitbucket.org/fabuye/madouqu
+    #   → https://fabuye.site/config.js 的「麻豆区」分组。
+    # 站点换域名时只有这条链路是权威的；静态备用表里大半是早就作废的旧域名。
+    publish_note = ""
+    try:
+        from madouqu.core import publish_page as _pub
+
+        if progress:
+            progress(0, 0, "读取麻豆发布页…")
+        pub = _pub.sync(timeout=min(timeout, 10))
+        for u in pub.get("verified") or []:
+            if u not in cands:
+                cands.append(u)
+        publish_note = ("发布页 " + (pub.get("config_used") or "未取到域名表")
+                        + f"，可用 {len(pub.get('verified') or [])} 个")
+    except Exception as exc:  # noqa: BLE001
+        logger_note = f"发布页读取失败：{exc}"
+        publish_note = logger_note
     try:
         crawler = bk.madouqu().crawler.MadouquCrawler({"use_selenium": False})
-        cands.extend(crawler.fallback_urls or [])
+        cands.extend(u for u in (crawler.fallback_urls or []) if u not in cands)
     except Exception:  # noqa: BLE001
-        # 实测 2026-10-28：只有 .com 可用（直连 200 / 108KB / 1.3s），
-        # .cc 只剩 472B 空壳，.sbs/.club/.net/.org 全部 TLS/CONNECT 失败。
-        cands.extend(["https://madouqu.com", "https://madouqu.sbs",
-                      "https://madouqu.club", "https://madouqu.cc",
-                      "https://madouqu.net", "https://madouqu.org"])
+        # 实测 2026-10-28：发布页给的 madouqu.shop / madouqu2.sbs /
+        # madouqu2.shop 直连 200、107KB、含 entry-title（真站点）；
+        # 老的 .sbs/.club/.cc/.net/.org 多数 TLS/CONNECT 失败。
+        cands.extend(["https://madouqu.shop", "https://madouqu2.sbs",
+                      "https://madouqu2.shop", "https://madouqu.com"])
     # 导航页里如果出现麻豆条目，也算候选
     try:
         from . import nav as navmod
@@ -439,7 +457,7 @@ def _sync_madouqu(timeout: float, progress=None) -> Dict[str, Any]:
     s.save()
     return {"ok": True, "url": url, "direct": direct,
             "latency_ms": picked.get("ms", 0),
-            "via": "备用域名表" if direct else "备用域名表 · 代理",
+            "via": publish_note or ("备用域名表" if direct else "备用域名表 · 代理"),
             "note": (f"命中直连域名（校验 {len(picked.get('tried') or [])} 个）"
                      if direct else "直连都不通，仅代理可达")}
 

@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
 from ...core import backend, paths
 from ...core.settings import settings
 from ...core.tasks import CENTER, Task
-from ..preview import PreviewPane
 from ..widgets import Badge, Card, CoverLoader, HLine, make_table, open_path
 from .base import Page
 
@@ -123,9 +122,9 @@ class JiusePage(Page):
         self.tabs.addTab(self._tab_records(), "检测与下载记录")
         self.tabs.currentChanged.connect(
             lambda i: self.reload_records() if i == 1 else None)
-        self.preview = PreviewPane()
-        self.preview.setMinimumHeight(320)
-        self.attach_preview(self.tabs, self.preview)
+        # 2026-10-29：预览面板已屏蔽（同媒体库其它模块），宽度全部给封面墙。
+        self.preview = None
+        self.set_content(self.tabs)
 
     # ---------------------------------------------------------------- 主标签
     def _tab_main(self) -> QWidget:
@@ -251,7 +250,15 @@ class JiusePage(Page):
         self.table.itemChanged.connect(self._update_pick)
         self.table.itemSelectionChanged.connect(self._preview_selected)
         self.table.setMinimumHeight(220)
-        gl.addWidget(self.table, 1)
+
+        # 封面墙：列表里 120x68 的小图看不清，用户要"所有封面都显示出来"。
+        # 列表保留（勾选下载要用），封面墙作为并列视图，卡片点了也能预览/勾选。
+        self.views = QTabWidget()
+        self.views.setDocumentMode(True)
+        self.views.addTab(self.table, "列表")
+        self._build_cover_wall()
+        self.views.addTab(self.wall, "封面墙")
+        gl.addWidget(self.views, 1)
         lay.addWidget(grab, 1)
 
         # ---- 队列
@@ -480,6 +487,62 @@ class JiusePage(Page):
                                         self.notify(tb.splitlines()[-1][:160], "err")))
         CENTER.start(task)
 
+    # ------------------------------------------------------------ 封面墙
+    def _build_cover_wall(self) -> None:
+        """封面墙视图：与黄果同一套通用网格（媒体库各模块统一）。"""
+        from .. import theme
+        from ..cover_cache import CoverCache
+        from ..cover_grid import CoverGrid
+
+        tokens = theme.tokens(settings().get("theme", "dark") != "light")
+
+        def _fetch(url: str):
+            import requests
+
+            ref = str(settings().get("jiuse.active_url", "") or "https://91porny.com/")
+            if not ref.endswith("/"):
+                ref += "/"
+            try:
+                r = requests.get(url, timeout=15, headers={
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/126.0.0.0 Safari/537.36"),
+                    "Referer": ref,
+                })
+                if r.status_code == 200 and r.content:
+                    return r.content
+            except Exception:                       # noqa: BLE001
+                return None
+            return None
+
+        # 封面落在数据库同目录（DATA/jiuse/covers），跟黄果/糖心一个规矩
+        self._wall_cache = CoverCache(paths.data_dir("jiuse", "covers"),
+                                      fetch=_fetch, size=(160, 224))
+        self.wall = CoverGrid(tokens, (160, 224), self._wall_cache,
+                              key_field="url", cover_field="cover",
+                              total_field="total")
+        self.wall.selected.connect(self._on_wall_selected)
+        self.wall.activated.connect(self._on_wall_activated)
+        self.wall.setMinimumHeight(260)
+
+    def _on_wall_selected(self, item: dict) -> None:
+        it = item.get("data") or item
+        try:
+            self._preview_item(it)
+        except Exception:                           # noqa: BLE001
+            pass
+
+    def _on_wall_activated(self, item: dict) -> None:
+        """双击封面墙卡片 = 在列表里勾选它（下载仍走列表的勾选）。"""
+        url = str(item.get("key") or "")
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is not None and str((it.data(Qt.ItemDataRole.UserRole) or {}).get("url", "")) == url:
+                it.setCheckState(Qt.CheckState.Checked)
+                self.table.selectRow(r)
+                break
+        self._update_pick()
+
     def _grab_done(self, res: dict) -> None:
         self.btn_grab.setEnabled(True)
         self.btn_home.setEnabled(True)
@@ -521,6 +584,11 @@ class JiusePage(Page):
                 addr_it.setToolTip(f"时长 {dur}\n{it.get('url', '')}")
             self.table.setItem(r, 3, addr_it)
         self.table.blockSignals(False)
+        # 同步填封面墙（同一批数据两种视图）
+        try:
+            self.wall.set_items(items)
+        except Exception:                       # noqa: BLE001
+            pass
         self.badge_grab.setText(f"{len(items)} 条")
         self.lbl_pick.setText("已选 0")
         with_cover = sum(1 for it in items if (it.get("cover") or "").strip())
@@ -543,20 +611,10 @@ class JiusePage(Page):
         row = self.table.currentRow()
         if row < 0 or row >= len(self._items):
             return
-        it = self._items[row]
-        url = (it.get("url") or "").strip()
-        self.preview.preview(
-            title=it.get("title", "") or url or "",
-            thumb=it.get("cover") or None,
-            # 点「在线播放」时后台解析直链（91 站多为 m3u8，面板会自动转封装后内嵌播）
-            resolver=(lambda u=url: backend.resolve_direct(u)) if url else None,
-            # 九色解析只要 2 秒（一次 GET + 正则），放心在选中时就预解析
-            prefetch=bool(url),
-        )
-        # 只在「预览」标签上打个圆点，不把正在浏览的网页切走
-        ws = getattr(self, "workspace", None)
-        if ws is not None and hasattr(ws, "mark_preview"):
-            ws.mark_preview()
+        self._preview_item(self._items[row])
+
+    def _preview_item(self, it: dict) -> None:
+        """占位：内置预览面板已按用户要求屏蔽（保留方法避免旧调用报错）。"""
 
     def _toggle_all(self, state: int) -> None:
         on = bool(state)

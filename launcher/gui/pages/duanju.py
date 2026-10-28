@@ -18,14 +18,77 @@ import time
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ...core import backend
+from ...core import backend, paths
 from ...core.settings import settings
 from ...core.tasks import CENTER, Task
+from ..cover_cache import CoverCache
+from ..cover_grid import CoverGrid
 from ..widgets import Card, HLine, SearchInput, make_table
-from .huangguo import HuangguoPage
+from .huangguo import HuangguoPage, _ui_tokens
+
+
+def _looks_like_image(data: bytes) -> bool:
+    return (data[:3] == b"\xff\xd8\xff"          # JPEG
+            or data[:4] == b"\x89PNG"            # PNG
+            or data[:4] == b"RIFF"               # WEBP
+            or data[:4] == b"GIF8")              # GIF
+
+
+def _decode_any(data: bytes):
+    """聚合库混着**多个站点**的封面，各站加密方式不同（aes / xor / 明文）。
+
+    ``decrypt_cover()`` 不传 mode 时按当前站点解 ⇒ 其它站点的图全解不出来
+    （实测：huangguome 用 xor，按 aes 解返回 None ⇒ 整屏 40 张空卡）。
+    这里三种模式都试一遍，认出图像头就返回。
+    """
+    try:
+        dec = backend.huangguo().media_crypto.decrypt_cover
+    except Exception:                            # noqa: BLE001
+        return None
+    for mode in ("aes", "xor", ""):
+        try:
+            out = dec(data, mode)
+        except Exception:                        # noqa: BLE001
+            continue
+        if out and _looks_like_image(out):
+            return out
+    # 本来就是明文（没加密的站），原样返回让 QImage 自己认
+    return data if _looks_like_image(data) else None
+
+
+class _PlatformWall(CoverGrid):
+    """平台总览的封面墙：聚合库跨多站，did 会重名 ⇒ key 带上 site_id。"""
+
+    def __init__(self, tokens: dict, parent=None):
+        super().__init__(tokens, (160, 224), None, parent=parent)
+
+    def set_rows(self, rows: list[dict]) -> None:
+        items = []
+        for r in rows or []:
+            sid = str(r.get("site_id") or "")
+            did = str(r.get("did") or "")
+            if not did:
+                continue
+            # 聚合库里有脏数据：cover_url 存的是字符串 "0"（采集时没拿到图）。
+            # 直接当 URL 去请求 ⇒ 每张都 miss，首屏一片"无封面"。这里只认 http。
+            url = str(r.get("cover_url") or "").strip()
+            if not url.lower().startswith(("http://", "https://")):
+                url = ""
+            items.append({
+                "key": f"{sid}:{did}",
+                "cover": url,
+                "title": str(r.get("title") or ""),
+                "total": int(r.get("ep_count") or 0),
+                "sub": f"{r.get('score') or ''}分" if r.get("score") else "",
+                "data": r,
+            })
+        # 有封面的排前面（稳定排序，不打乱同组内的原有顺序）：
+        # 1000+ 条里混着两百多条没图的，不排的话首屏可能整屏都是空卡。
+        items.sort(key=lambda d: 0 if d["cover"] else 1)
+        self.set_items(items)
 
 
 class DuanjuPage(HuangguoPage):
@@ -112,19 +175,49 @@ class DuanjuPage(HuangguoPage):
 
         lay.addWidget(HLine())
 
-        # ---- 聚合库表格
+        # ---- 聚合库：列表 + 封面墙
+        # 总览页是进「短剧平台」第一眼看到的页，这里只有表格的话用户看到的就是
+        # "短剧平台没有封面"。聚合库本身带 cover_url（实测 1000+ 条），
+        # 所以两个视图并列：表格用来筛选/看状态，封面墙用来扫片。
+        self.views_platform = QTabWidget()
+
+        tab_list = QWidget()
+        tl = QVBoxLayout(tab_list)
+        tl.setContentsMargins(0, 0, 0, 0)
         self.table_platform = make_table(
             ["剧名", "来源平台", "集数", "状态", "已下", "编号"],
             [360, 130, 60, 110, 60, 80])
         self.table_platform.itemSelectionChanged.connect(self._on_platform_row)
         self.table_platform.cellDoubleClicked.connect(self._on_platform_open)
-        lay.addWidget(self.table_platform, 1)
+        tl.addWidget(self.table_platform, 1)
+        self.views_platform.addTab(tab_list, "列表")
+
+        tab_wall = QWidget()
+        tw = QVBoxLayout(tab_wall)
+        tw.setContentsMargins(0, 0, 0, 0)
+        self.wall_platform = _PlatformWall(_ui_tokens())
+        self.wall_platform.activated.connect(self._on_wall_open)
+        tw.addWidget(self.wall_platform, 1)
+        self.views_platform.addTab(tab_wall, "封面墙")
+
+        lay.addWidget(self.views_platform, 1)
 
         self.lbl_platform_hint = QLabel(
-            "双击一行：切到该平台并继续浏览、选集、下载。")
+            "双击一行（或封面墙卡片）：切到该平台并继续浏览、选集、下载。")
         self.lbl_platform_hint.setObjectName("Muted")
         lay.addWidget(self.lbl_platform_hint)
         return w
+
+    def _on_wall_open(self, item: dict) -> None:
+        """封面墙双击：切到该条所属平台。"""
+        data = item.get("data") or {}
+        sid = str(data.get("site_id") or "")
+        if not sid:
+            return
+        idx = self.cmb_platform.findData(sid)
+        if idx >= 0:
+            self.cmb_platform.setCurrentIndex(idx)
+        self._switch_to_platform()
 
     # ---------------------------------------------------------------- 站点
     def _fill_platforms(self) -> None:
@@ -246,12 +339,35 @@ class DuanjuPage(HuangguoPage):
             ]
             for c, v in enumerate(vals):
                 self.table_platform.setItem(i, c, QTableWidgetItem(v))
+        self._sync_wall(rows)
         if not rows:
             self.lbl_platform_hint.setText(
                 "没有匹配的剧目：先点「扫描全平台」把各平台内容收进统一库。")
         else:
             self.lbl_platform_hint.setText(
                 f"共 {len(rows)} 条 · 双击一行切到该平台浏览下载")
+
+    def _sync_wall(self, rows: list[dict]) -> None:
+        """把聚合库的封面同步到封面墙（缓存后置，后端就绪才有）。"""
+        wall = getattr(self, "wall_platform", None)
+        if wall is None:
+            return
+        if getattr(self, "_wall_cover", None) is None:
+            ns = self._ns
+            if ns is None:
+                return
+            try:
+                self._wall_cover = CoverCache(
+                    paths.data_dir("huangguo", "covers", "_platform"),
+                    decode=_decode_any,
+                    fetch=lambda u: ns.http_client.fetch_bytes(u, timeout=15),
+                    size=(int(ns.config.COVER_WIDTH), int(ns.config.COVER_HEIGHT)),
+                )
+            except Exception:                    # noqa: BLE001
+                self._wall_cover = None
+        if self._wall_cover is not None and wall._cache is not self._wall_cover:
+            wall.set_cache(self._wall_cover)
+        wall.set_rows(rows)
 
     def _on_platform_row(self) -> None:
         rows = self.table_platform.selectionModel().selectedRows()

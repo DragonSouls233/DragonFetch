@@ -46,20 +46,64 @@ def _to_url(s: str) -> QUrl:
     return QUrl(s)
 
 
-def _find_local(directory: str, hint: str) -> str | None:
-    """在 directory 里模糊匹配文件名包含 hint 的最新视频文件。"""
+_MAX_SCAN = 6000          # 兜底：超大 NAS 目录扫到这个数就停，避免卡界面
+
+# 封面/CDN 请求用的 UA：不少图床对空 UA 直接 403
+_UA = (b"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       b"(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def _find_local(directory: str, hint: str, actor: str = "") -> str | None:
+    """在 directory 里模糊匹配文件名包含 hint 的最新视频文件。
+
+    ⚠️ 为什么不能只在根目录 ``listdir``：糖心的落盘布局是
+    ``{root}/{演员}/{标题}/{标题}.mp4``（三层），早期版本还有两层
+    （``{root}/{演员}/{标题}.mp4``）。只在根目录找 ⇒ 文件其实早就下好了，
+    预览面板却一直显示"无本地文件"，用户以为功能没移植过来。
+    这里优先扫演员子目录（快且能消歧义），再浅扫全目录，深度封顶 3 层。
+    """
     if not directory or not os.path.isdir(directory) or not hint:
         return None
-    hint = re.sub(r'[\\/:*?"<>|]', "_", hint).lower()
+    key = re.sub(r'[\\/:*?"<>|]', "_", hint).lower()
     best: str | None = None
-    try:
-        for name in os.listdir(directory):
-            if name.lower().endswith(_VIDEO_EXT) and hint in name.lower():
-                p = os.path.join(directory, name)
-                if best is None or os.path.getmtime(p) > os.path.getmtime(best):
+    seen = [0]
+
+    def _mtime(p: str) -> float:
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+
+    def _scan(root: str, depth: int) -> None:
+        nonlocal best
+        if best is not None or depth > 3 or seen[0] > _MAX_SCAN:
+            return
+        try:
+            names = os.listdir(root)
+        except OSError:
+            return
+        for name in names:
+            if seen[0] > _MAX_SCAN:
+                return
+            seen[0] += 1
+            p = os.path.join(root, name)
+            if os.path.isdir(p):
+                _scan(p, depth + 1)
+                continue
+            if name.lower().endswith(_VIDEO_EXT) and key in name.lower():
+                if best is None or _mtime(p) > _mtime(best):
                     best = p
-    except OSError:
-        return None
+
+    # 1) 演员子目录优先：同名标题在不同演员下很常见，先定位能少扫一大片
+    if actor:
+        safe_actor = re.sub(r'[\\/:*?"<>|]', "_", (actor or "").strip())
+        sub = os.path.join(directory, safe_actor)
+        if os.path.isdir(sub):
+            _scan(sub, 0)
+            if best:
+                return best
+    # 2) 兜底：整个输出目录浅扫（最多 3 层）
+    _scan(directory, 0)
     return best
 
 
@@ -81,6 +125,7 @@ class PreviewPane(QFrame):
         self._pf_token_running = 0   # 正在预解析的令牌（0 = 没有在跑）
         self._pf_click_pending = False   # 用户在解析期间就点了「在线播放」
         self._warmup_task = None
+        self._referer = ""       # 封面请求的 Referer（防盗链）
         # 原生 HLS 起播看门狗：超时还没出画面就退回 ffmpeg 转封装
         self._hls_watch = QTimer(self)
         self._hls_watch.setSingleShot(True)
@@ -157,9 +202,17 @@ class PreviewPane(QFrame):
         root.addWidget(self._body_widget, 1)
 
     # ----------------------------------------------------------- 公共入口
+    def set_referer(self, url: str) -> None:
+        """设置远程封面请求带的 Referer（站点防盗链用）。
+
+        糖心/多站点的封面 CDN 会校验来源，不带 Referer 一律 403 —— 表现就是
+        「封面一张都出不来」。页面在 on_show 时把站点首页设进来即可。
+        """
+        self._referer = (url or "").strip()
+
     def preview(self, title: str = "", thumb: str | None = None,
                 video: str | None = None, local_dir: str | None = None,
-                local_hint: str | None = None,
+                local_hint: str | None = None, local_actor: str = "",
                 resolver=None, prefetch: bool = False) -> None:
         """显示一条内容。
 
@@ -186,7 +239,7 @@ class PreviewPane(QFrame):
             QTimer.singleShot(400, self._prefetch)
         src: str | None = None
         if local_dir and local_hint:
-            src = _find_local(local_dir, local_hint)
+            src = _find_local(local_dir, local_hint, local_actor or "")
         if not src and video:
             src = video
         self.play(src)
@@ -304,6 +357,11 @@ class PreviewPane(QFrame):
         # 远程：异步拉取（带过期令牌，避免旧请求覆盖新图）
         self._img_token += 1
         req = QNetworkRequest(QUrl(url_or_path))
+        # 封面 CDN 普遍按 Referer/UA 防盗链：不带 Referer 直接 403，
+        # 表现就是「封面一个都不显示」。这里带上站点来源和完整 UA。
+        if getattr(self, "_referer", ""):
+            req.setRawHeader(b"Referer", str(self._referer).encode("utf-8"))
+        req.setRawHeader(b"User-Agent", _UA)
         reply = self._net.get(req)
         reply.setProperty("tok", self._img_token)
         self._reply = reply

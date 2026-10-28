@@ -42,32 +42,31 @@ class Page(QWidget):
         return ""
 
     # ---------------------------------------------------------------- 布局
-    def attach_preview(self, content, preview, width: int = 430):
-        """把主内容与右侧工作区装成可拖拽分栏。
+    def set_content(self, content) -> None:
+        """只放主内容（**不带右侧预览面板**）。
 
-        右侧默认是 **「浏览」+「预览」两个标签**：浏览是 QtWebEngine 真站点
-        （可直接登录/点播/下载），预览是解析直链后的内嵌播放。两者共用一块
-        纵向空间，用标签切换而不是硬挤成两栏——用户要的是"一片大面积浏览"。
+        媒体库各模块（黄果/短剧/糖心/九色）已经改成"只做封面库"：右侧不摆
+        播放器，把全部宽度让给封面网格——一屏能多放两列，用户扫片更快。
+        要看片用侧栏独立的「浏览器」TAB。
+        """
+        self.workspace = None
+        self.browser_panel = None
+        self._main_split = None
+        self.body.addWidget(content, 1)
+
+    def attach_preview(self, content, preview, width: int = 430):
+        """把主内容与右侧预览区装成可拖拽分栏。
+
+        2026-10-29 起 **不再内嵌浏览器**：每个模块页面都塞一个 Chromium 实例，
+        既吃内存又让"媒体库"各页长得像浏览器壳。浏览器收敛成侧栏里
+        独立的一个 TAB（``pages/browser_page.py``），这里只放预览/详情面板。
         """
         from PyQt6.QtCore import Qt
-        from PyQt6.QtWidgets import QSplitter, QTabWidget
+        from PyQt6.QtWidgets import QSplitter
 
-        from ..browser import BrowserPanel, WebWorkspace
-
-        if isinstance(preview, (WebWorkspace, QTabWidget)):
-            # 页面自己已经组织好右侧(黄果/糖心：「网页」+「播放器」)，直接沿用；
-            # 顺手把里面的浏览器找出来，供 switch_page 触发懒加载。
-            right = preview
-            for i in range(preview.count()):
-                w = preview.widget(i)
-                if isinstance(w, BrowserPanel):
-                    self.browser_panel = w
-                    break
-        else:
-            right = WebWorkspace(preview, home_url=self.home_url(),
-                                 download_dir=self.browse_download_dir())
-            self.browser_panel = right.browser
+        right = preview
         self.workspace = right
+        self.browser_panel = None
 
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setObjectName("MainSplit")

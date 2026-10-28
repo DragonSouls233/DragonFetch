@@ -14,7 +14,7 @@ import queue
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QProgressBar, QPushButton,
     QPlainTextEdit, QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -126,13 +126,15 @@ class YtTiktokPage(Page):
         s = settings()
         self._items: list = []          # [(url, VideoInfo|None, error)]
         self._worker = None
+        self._version_task: Task | None = None
         self._stop_event = threading.Event()
 
         btn_out = QPushButton("打开下载目录")
         btn_out.setObjectName("Ghost")
         btn_out.clicked.connect(self._open_out)
         self.header.add_action(btn_out)
-        self.badge_ver = Badge(f"yt-dlp {self._ver()}")
+        self.badge_ver = Badge(
+            f"yt-dlp {backend.cached_ytdlp_version('检测中…')}")
         self.header.add_action(self.badge_ver)
 
         # ---------------- 输入
@@ -252,21 +254,28 @@ class YtTiktokPage(Page):
         lv.addWidget(q_card, 0)
         self.attach_preview(left_col, self.preview)
         self.table.itemSelectionChanged.connect(self._preview_selected)
+        QTimer.singleShot(0, self._load_version)
 
     # ---------------------------------------------------------------- 工具
-    @staticmethod
-    def _ver() -> str:
-        try:
-            return backend.ytdlp_version()
-        except Exception:
-            return "不可用"
+    def _load_version(self) -> None:
+        """异步查询 yt-dlp 版本；重复进页面不会再次启动子进程。"""
+        cached = backend.cached_ytdlp_version("")
+        if cached:
+            self.badge_ver.setText(f"yt-dlp {cached}")
+            return
+        if self._version_task is not None and self._version_task.isRunning():
+            return
+        self.badge_ver.setText("yt-dlp 检测中…")
+        task = Task(backend.ytdlp_version)
+        task.done.connect(
+            lambda version: self.badge_ver.setText(f"yt-dlp {version or '未知'}"))
+        task.failed.connect(lambda _tb: self.badge_ver.setText("yt-dlp 不可用"))
+        self._version_task = task
+        CENTER.start(task)
 
     def _open_out(self) -> None:
         if not open_path(settings().get("yttiktok.download_dir", "")):
             self.notify("下载目录尚未创建（下载一次后自动建立）", "warn")
-
-    def on_show(self) -> None:
-        self.badge_ver.setText(f"yt-dlp {self._ver()}")
 
     def _urls(self) -> list[str]:
         raw = [x.strip() for x in self.ed_urls.toPlainText().splitlines() if x.strip()]

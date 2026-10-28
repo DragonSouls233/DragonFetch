@@ -638,6 +638,72 @@ _INDEX = None
 _INDEX_LOCK = threading.Lock()
 
 
+def _load_known_dirs() -> list:
+    """读已知扫描目录：**数据库优先**，读不到才回落 settings.json。
+
+    2026-10-29：用户要求"扫描文件夹目录要记录到数据库"。以前只存在
+    settings.json 里，换台机器/重装后配置就丢了，索引也就建不起来 ——
+    于是每个作品都被判成"未下载"，重复下载。现在以 tangxin.db 的 meta 表
+    为准，首次启动把 settings 里的旧值迁移进库，之后一律走库。
+    """
+    import json
+
+    dirs: list = []
+    try:
+        from . import cache
+
+        raw = cache.get_meta("known_dirs", "")
+        if raw:
+            got = json.loads(raw)
+            if isinstance(got, list):
+                dirs = [str(d) for d in got if str(d or "").strip()]
+    except Exception:
+        dirs = []
+    if not dirs:
+        try:
+            from . import settings
+
+            data = settings.load(apply_to_config=False)
+            dirs = [str(d) for d in (data.get("known_dirs") or [])
+                    if str(d or "").strip()]
+        except Exception:
+            dirs = []
+        if dirs:
+            # 迁移：把 settings 里的旧配置写进库，以后就以库为准
+            try:
+                save_known_dirs(dirs)
+            except Exception:
+                pass
+    return dirs
+
+
+def save_known_dirs(dirs) -> list:
+    """把已知扫描目录**持久化到数据库**（tangxin.db 的 meta 表）。"""
+    import json
+
+    from . import cache as _cache
+
+    out = []
+    for d in dirs or []:
+        d = str(d or "").strip()
+        if d and d not in out:
+            out.append(d)
+    try:
+        _cache.set_meta("known_dirs", json.dumps(out, ensure_ascii=False))
+    except Exception:
+        pass
+    # settings 里也留一份（旧版本/其它模块还在读它，避免行为不一致）
+    try:
+        from . import settings
+
+        s = settings.load(apply_to_config=False)
+        s["known_dirs"] = out
+        settings.save(s)
+    except Exception:
+        pass
+    return out
+
+
 def get_index() -> ExistingIndex:
     """进程级单例。
 
@@ -648,13 +714,7 @@ def get_index() -> ExistingIndex:
     global _INDEX
     with _INDEX_LOCK:
         if _INDEX is None:
-            dirs = []
-            try:
-                from . import settings
-                data = settings.load(apply_to_config=False)
-                dirs = list(data.get("known_dirs") or [])
-            except Exception:
-                dirs = []
+            dirs = _load_known_dirs()
             out = getattr(config, "OUTPUT_BASE", "") or ""
             if out:
                 norm = [os.path.normpath(d) for d in dirs]
@@ -665,12 +725,13 @@ def get_index() -> ExistingIndex:
 
 
 def apply_known_dirs(dirs) -> ExistingIndex:
-    """用户**主动改动**已知目录时调用：配置索引（自动并入 OUTPUT_BASE）。
+    """用户**主动改动**已知目录时调用：写库 + 配置索引（自动并入 OUTPUT_BASE）。
 
     与 ``settings.apply()`` 的区别：那个只写 config，不碰索引（否则每次启动
     都会因列表不一致而清库重扫）；这个才是真正的"用户改了配置"入口。
     """
     all_dirs = [d for d in (dirs or []) if d]
+    save_known_dirs(all_dirs)          # 持久化到 tangxin.db
     out = getattr(config, "OUTPUT_BASE", "") or ""
     if out and os.path.normpath(out) not in [os.path.normpath(d) for d in all_dirs]:
         all_dirs.append(out)

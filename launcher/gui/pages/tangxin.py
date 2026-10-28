@@ -17,23 +17,39 @@ import threading
 import time
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QSplitter,
-    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QProgressBar, QPushButton, QSpinBox,
+    QSplitter, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ...core import backend, nav, paths
 from ...core.settings import settings
 from ...core.tasks import CENTER, Task
+from .. import theme
 from ..widgets import Badge, Card, HLine, SearchInput, make_table, open_path
 from .base import Page
-from ..preview import PreviewPane
 
 
 def _safe_name(text: str) -> str:
     s = re.sub(r'[\\/:*?"<>|]+', "_", (text or "").strip())
     return s.strip(" .") or "未命名"
+
+
+def _status_colors() -> dict:
+    """「本地状态」列三态配色（跟随主题，不写死深色）。
+
+    已下载＝绿（ok）／别处已有＝琥珀（warn）／未下载＝灰（muted）。
+    用户的核心诉求就是"扫完目录一眼看出哪些下过、哪些没下"，
+    纯文字三态在两百行的表里等于没有视觉锚点，必须上色。
+    """
+    t = theme.tokens(settings().get("theme", "dark") != "light")
+    return {
+        "downloaded": t.get("ok", "#33c98b"),
+        "elsewhere": t.get("warn", "#f0b429"),
+        "none": t.get("muted", "#69748a"),
+    }
 
 
 class _PoolDownload(QThread):
@@ -153,6 +169,10 @@ class TangxinPage(Page):
     title = "糖心 Vlog"
     subtitle = "导航页用代理读线路，站点直连；演员云 → 作品库 → 并发队列 → 下载记录"
 
+    # 本地索引在后台线程建完后的通知。回调线程里不能直接碰 Qt 控件，
+    # 必须过信号转回主线程再刷新「本地状态」列。
+    _index_ready = pyqtSignal()
+
     # ---------------------------------------------------------------- 构建
     def build(self) -> None:
         s = settings()
@@ -163,6 +183,10 @@ class TangxinPage(Page):
         self._worker = None
         self._stop_event = threading.Event()
         self._paused_event = threading.Event()
+        self._actors_cached = 0        # 本次展示来自缓存的演员数（断网兜底用）
+        self._videos_cached = False    # 当前作品表是否先用缓存填的
+        self._index_ready.connect(self._on_index_ready)
+        self._status_colors = _status_colors()
 
         btn_out = QPushButton("打开输出目录")
         btn_out.setObjectName("Ghost")
@@ -176,9 +200,9 @@ class TangxinPage(Page):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab_crawl(), "采集与下载")
         self.tabs.addTab(self._tab_records(), "下载记录")
-        self.preview = PreviewPane()
-        self.preview.setMinimumHeight(320)
-        self.attach_preview(self.tabs, self.preview)
+        # 2026-10-29：预览面板已屏蔽（同媒体库其它模块），宽度全部给封面墙。
+        self.preview = None
+        self.set_content(self.tabs)
 
         self._load_route_choices()
         self._update_pick()
@@ -238,7 +262,10 @@ class TangxinPage(Page):
         lh.addWidget(self.badge_actors)
         lh.addStretch(1)
         self.btn_actors = QPushButton("加载演员云")
-        self.btn_actors.clicked.connect(self.load_actors)
+        self.btn_actors.setToolTip(
+            "从本地缓存秒开，同时后台联网增量同步新演员。\n"
+            "按住 Shift 点击＝忽略缓存强制重新抓取")
+        self.btn_actors.clicked.connect(self._on_actors_clicked)
         lh.addWidget(self.btn_actors)
         ll.addLayout(lh)
         self.ed_filter = SearchInput("筛选演员…", width=0)
@@ -260,7 +287,21 @@ class TangxinPage(Page):
         self.lbl_actor.setObjectName("Muted")
         rh.addWidget(t2)
         rh.addWidget(self.lbl_actor, 1)
-        self.btn_scan = QPushButton("扫描目录")
+        self.btn_warm = QPushButton("预下载封面")
+        self.btn_warm.setObjectName("Ghost")
+        self.btn_warm.setToolTip(
+            "把当前演员的全部封面提前抓下来，存到数据库同目录的 covers 缓存。\n"
+            "下次打开（或断网时）直接读磁盘。")
+        self.btn_warm.clicked.connect(self.warm_covers)
+        rh.addWidget(self.btn_warm)
+        self.btn_dirs = QPushButton("扫描目录…")
+        self.btn_dirs.setObjectName("Ghost")
+        self.btn_dirs.setToolTip(
+            "管理「已知目录」（本机下载目录 + NAS/外盘）：列表存进 tangxin.db，\n"
+            "换机器也不丢；已扫到的成品也记进库，下载前先查库，下过的直接跳过")
+        self.btn_dirs.clicked.connect(self.manage_dirs)
+        rh.addWidget(self.btn_dirs)
+        self.btn_scan = QPushButton("重新扫描")
         self.btn_scan.setObjectName("Ghost")
         self.btn_scan.setToolTip(
             "重扫已知目录（本机下载目录 + 配置的 NAS/外盘），\n"
@@ -285,7 +326,15 @@ class TangxinPage(Page):
             ["选择", "标题", "时长", "本地状态", "编号"], [52, 350, 80, 96, 110])
         self.table_videos.itemChanged.connect(self._update_pick)
         self.table_videos.itemSelectionChanged.connect(self._preview_selected)
-        rrl.addWidget(self.table_videos, 1)
+
+        # 封面墙：糖心一部作品一张封面，表格式的小缩略图看不清人。
+        # 列表保留（勾选/状态/并发下载都在表上），封面墙作为并列视图。
+        self._build_cover_wall()
+        self.views_videos = QTabWidget()
+        self.views_videos.setDocumentMode(True)
+        self.views_videos.addTab(self.table_videos, "列表")
+        self.views_videos.addTab(self.wall, "封面墙")
+        rrl.addWidget(self.views_videos, 1)
 
         bottom = QHBoxLayout()
         self.lbl_pick = QLabel("已选 0")
@@ -402,12 +451,48 @@ class TangxinPage(Page):
             self.apply_route()
         if self.tabs.currentIndex() == 1:
             self.reload_records()
+        self._prime_from_cache()
         # 首次进入就自动拉演员云：否则页面一片空白，用户以为"没内容/坏了"。
         # 只自动跑一次，之后由「加载演员云」按钮决定是否刷新。
         if not getattr(self, "_auto_loaded", False):
             self._auto_loaded = True
-            if self.list_actors.count() == 0:
-                QTimer.singleShot(250, self.load_actors)
+            QTimer.singleShot(250, self.load_actors)
+        # 进页面就保证本地索引是最新的（过期/空才真扫）。索引没建好时
+        # 「本地状态」全是"未下载"，用户会以为功能没移植过来。
+        self._ensure_index()
+
+    # ------------------------------------------------------- 缓存优先 & 索引
+    def _prime_from_cache(self) -> None:
+        """进页面先用本地缓存把演员云填满（毫秒级，不联网）。
+
+        DB 里存着 800+ 位演员，但之前界面从不读它 ⇒ 每次开软件都空白等网络。
+        """
+        if self.list_actors.count():
+            return
+        cached = self._cached_actors()
+        if not cached:
+            return
+        self._fill_actors(cached)
+        self._actors_cached = len(cached)
+        self._sync_actors_btn(True)
+        self.lbl_q.setText(f"缓存演员云：{len(cached)} 位")
+
+    def _ensure_index(self) -> None:
+        """需要时后台重建本地文件索引（用于判定"已下载/别处已有"）。
+
+        ``ensure_ready`` 的 ``on_done`` 在**工作线程**里回调，直接刷表格会
+        跨线程崩，所以用 ``_index_ready`` 信号转回主线程。
+        """
+        try:
+            self._ns.existing.get_index().ensure_ready(
+                max_age_hours=12,
+                on_done=lambda *_a: self._index_ready.emit())
+        except Exception:                                   # noqa: BLE001
+            pass
+
+    def _on_index_ready(self) -> None:
+        """索引建完（或本来就是新的）：重算「本地状态」列。"""
+        self._refresh_local_status()
 
     def _ensure_backend(self) -> bool:
         if self._ns is not None:
@@ -500,22 +585,74 @@ class TangxinPage(Page):
             self.notify("输出目录尚未创建（下载一次后自动建立）", "warn")
 
     # ---------------------------------------------------------------- 演员
-    def load_actors(self) -> None:
+    def _on_actors_clicked(self) -> None:
+        """按钮入口：默认走缓存+增量，Shift+点击强制全量重抓。"""
+        mods = QApplication.keyboardModifiers()
+        force = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        self.load_actors(force=force)
+
+    def _cached_actors(self) -> list:
+        """读本地缓存里的演员云（毫秒级）。失败返回空列表。"""
+        try:
+            return list(self._ns.cache.get_actors() or [])
+        except Exception:                                   # noqa: BLE001
+            return []
+
+    def _fill_actors(self, actors) -> None:
+        """把演员列表填进左栏（缓存/联网结果共用）。"""
+        self._actors = list(actors or [])
+        self.badge_actors.setText(str(len(self._actors)))
+        self.list_actors.blockSignals(True)
+        self.list_actors.clear()
+        for a in self._actors:
+            item = QListWidgetItem(f"{a.name}  ({a.count})")
+            item.setData(Qt.ItemDataRole.UserRole, a)
+            self.list_actors.addItem(item)
+        self.list_actors.blockSignals(False)
+
+    def load_actors(self, force: bool = False) -> None:
+        """加载演员云：**缓存优先**，后台再联网增量同步。
+
+        之前每次进页面都要联网抓 800+ 位演员（几秒到几十秒空白等待），
+        而 ``tangxin.cache`` 里其实早就存好了全量演员云——只是界面没去读。
+        现在：缓存非空 ⇒ 先秒开填表，再后台抓一遍只补新增（只增不改，
+        界面不闪）；force=True（Shift+点击）才忽略缓存重抓。
+        """
         if not self._ensure_backend():
             return
+
+        # 1) 缓存优先：先拿 DB 里的演员云秒开，用户不用盯着空列表
+        shown = 0
+        if not force:
+            cached = self._cached_actors()
+            if cached:
+                self._fill_actors(cached)
+                shown = len(cached)
+        self._actors_cached = shown
+        self._sync_actors_btn(shown > 0)
+
         self.btn_actors.setEnabled(False)
-        self.lbl_q.setText("加载演员云…")
+        self.lbl_q.setText(
+            f"缓存 {shown} 位，后台增量同步…" if shown else "加载演员云…")
+
+        ns = self._ns
 
         def _run(progress=None):
-            ns = backend.tangxin()
             crawler = ns.crawler.TangXinCrawler()
             try:
-                return crawler.fetch_actor_cloud(progress=progress)
+                actors = crawler.fetch_actor_cloud(progress=progress)
             finally:
                 try:
                     crawler.close()
                 except Exception:
                     pass
+            # 联网结果写回缓存：下次打开就是秒开（只增不改）
+            delta = {}
+            try:
+                delta = ns.cache.upsert_actors(actors) or {}
+            except Exception:                               # noqa: BLE001
+                delta = {}
+            return actors, delta, shown
 
         task = Task(_run, want_progress=True)
         task.progress.connect(lambda p, t: self.lbl_q.setText(t or "加载演员云…"))
@@ -523,22 +660,33 @@ class TangxinPage(Page):
         task.failed.connect(self._actors_fail)
         CENTER.start(task)
 
-    def _actors_done(self, actors) -> None:
+    def _sync_actors_btn(self, has_cache: bool) -> None:
+        self.btn_actors.setText("刷新演员云" if has_cache else "加载演员云")
+
+    def _actors_done(self, payload) -> None:
+        actors, delta, shown = payload
         self.btn_actors.setEnabled(True)
-        self._actors = list(actors or [])
-        self.badge_actors.setText(str(len(self._actors)))
-        self.list_actors.clear()
-        for a in self._actors:
-            item = QListWidgetItem(f"{a.name}  ({a.count})")
-            item.setData(Qt.ItemDataRole.UserRole, a)
-            self.list_actors.addItem(item)
+        self._fill_actors(actors)
+        self._sync_actors_btn(True)
+        added = int((delta or {}).get("added", 0) or 0)
+        updated = int((delta or {}).get("updated", 0) or 0)
         self.lbl_q.setText(f"演员云：{len(self._actors)} 位")
-        self.notify(f"演员云：{len(self._actors)} 位", "ok")
+        msg = f"演员云：{len(self._actors)} 位"
+        if added or updated:
+            msg += f"（新增 {added} · 更新 {updated}）"
+        elif shown:
+            msg += "（缓存一致）"
+        self.notify(msg, "ok")
 
     def _actors_fail(self, tb: str) -> None:
         self.btn_actors.setEnabled(True)
+        # 缓存兜底：网断了但本地有数据 ⇒ 保留已填好的列表，只提示同步失败
+        if self._actors_cached:
+            self.lbl_q.setText(f"增量同步失败，仍显示缓存 {self._actors_cached} 位")
+            self.notify("联网同步失败，当前显示本地缓存", "warn")
+            return
         self.lbl_q.setText("演员云加载失败")
-        self.notify(tb.splitlines()[-1][:160], "err")
+        self.notify((tb or "").splitlines()[-1][:160] if tb else "加载失败", "err")
 
     def _filter_actors(self, text: str) -> None:
         kw = (text or "").strip().lower()
@@ -557,41 +705,123 @@ class TangxinPage(Page):
         self.lbl_actor.setText(f"{actor.name} · 标注 {actor.count} 部")
         self.load_videos(actor)
 
-    # ---------------------------------------------------------------- 作品
-    def load_videos(self, actor) -> None:
-        if not self._ensure_backend():
+    # ---------------------------------------------------------------- 封面墙
+    def _build_cover_wall(self) -> None:
+        """糖心作品封面墙（与黄果/九色同一套通用网格）。"""
+        from ..cover_cache import CoverCache
+        from ..cover_grid import CoverGrid
+
+        origin = ""
+        try:
+            origin = (getattr(backend.tangxin().config, "ORIGIN", "") or "").rstrip("/")
+        except Exception:                                   # noqa: BLE001
+            origin = ""
+        self._cover_referer = origin
+
+        def _fetch(url: str):
+            import requests
+
+            try:
+                r = requests.get(url, timeout=15, headers={
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/126.0.0.0 Safari/537.36"),
+                    "Referer": (self._cover_referer + "/") if self._cover_referer else url,
+                })
+                if r.status_code == 200 and r.content:
+                    return r.content
+            except Exception:                               # noqa: BLE001
+                return None
+            return None
+
+        # 封面落在数据库同目录（DATA/tangxin/covers），跟黄果/九色一个规矩
+        self._wall_cache = CoverCache(paths.data_dir("tangxin", "covers"),
+                                      fetch=_fetch, size=(160, 224))
+        self.wall = CoverGrid(
+            theme.tokens(settings().get("theme", "dark") != "light"),
+            (160, 224), self._wall_cache,
+            key_field="vid", cover_field="cover_url", total_field="total",
+            # 糖心一部作品就是"一集"：已下载就标 1/1，角标才显示得出来
+            default_total=1,
+            sub_fn=lambda v: str(getattr(v, "duration", "") or ""))
+        self.wall.selected.connect(self._on_wall_selected)
+        self.wall.activated.connect(self._on_wall_activated)
+        self.wall.setMinimumHeight(260)
+
+    def _on_wall_selected(self, item: dict) -> None:
+        v = item.get("data") or item
+        try:
+            self._preview_video(v)
+        except Exception:                                   # noqa: BLE001
+            pass
+
+    def _on_wall_activated(self, item: dict) -> None:
+        """双击封面墙卡片 = 在列表里勾选它（下载仍走列表勾选）。"""
+        vid = str(item.get("key") or "")
+        for r in range(self.table_videos.rowCount()):
+            cell = self.table_videos.item(r, 0)
+            if cell is None:
+                continue
+            v = cell.data(Qt.ItemDataRole.UserRole)
+            if v is not None and str(getattr(v, "vid", "")) == vid:
+                cell.setCheckState(Qt.CheckState.Checked)
+                self.table_videos.selectRow(r)
+                break
+        self._update_pick()
+
+    def warm_covers(self) -> None:
+        """把当前演员的全部封面提前抓到磁盘（数据库同目录的 covers）。"""
+        vids = list(getattr(self, "_videos", []) or [])
+        pairs = [(str(getattr(v, "vid", "")),
+                  (getattr(v, "cover_url", "") or "").strip()) for v in vids]
+        pairs = [(k, u) for k, u in pairs if k and u]
+        if not pairs:
+            self.notify("当前列表没有可下载的封面", "warn")
             return
-        self.table_videos.setRowCount(0)
-        self.lbl_q.setText(f"抓取 {actor.name} 的作品…")
+        self.btn_warm.setEnabled(False)
 
         def _run(progress=None):
-            ns = backend.tangxin()
-            crawler = ns.crawler.TangXinCrawler()
-            try:
-                videos = crawler.fetch_actor_videos(actor, 0, progress=progress)
-            finally:
-                try:
-                    crawler.close()
-                except Exception:
-                    pass
-            status = {}
-            try:
-                out_base = settings().get("tangxin.output_base", "")
-                status = ns.existing.get_index().status_map(videos, out_base)
-            except Exception:
-                status = {}
-            return videos, status
+            return self._wall_cache.warm(pairs, on_progress=progress)
 
         task = Task(_run, want_progress=True)
-        task.progress.connect(lambda p, t: self.lbl_q.setText(t or "抓取作品…"))
-        task.done.connect(self._videos_done)
-        task.failed.connect(lambda tb: (self.lbl_q.setText("作品抓取失败"),
-                                        self.notify(tb.splitlines()[-1][:160], "err")))
+        task.done.connect(self._warm_done)
+        task.failed.connect(lambda tb: (self.btn_warm.setEnabled(True),
+                                        self.notify("封面预下载失败", "err")))
         CENTER.start(task)
 
-    def _videos_done(self, payload) -> None:
-        videos, status = payload
+    def _warm_done(self, stat) -> None:
+        self.btn_warm.setEnabled(True)
+        stat = stat or {}
+        self.notify(
+            f"封面预下载完成：新下 {stat.get('ok', 0)} 张"
+            f"（已有 {stat.get('skip', 0)} 张）", "ok")
+
+    # ---------------------------------------------------------------- 作品
+    def _status_item(self, st: str) -> QTableWidgetItem:
+        """本地状态单元格：文字 + 配色 + 排序用的 UserRole。"""
+        label = {"downloaded": "已下载", "elsewhere": "别处已有"}.get(st, "未下载")
+        item = QTableWidgetItem(label)
+        item.setForeground(QBrush(QColor(self._status_colors.get(st, "#69748a"))))
+        item.setData(Qt.ItemDataRole.UserRole, "done" if st != "none" else "")
+        return item
+
+    def _cached_videos(self, actor) -> list:
+        try:
+            return list(self._ns.cache.get_videos(actor.slug) or [])
+        except Exception:                                   # noqa: BLE001
+            return []
+
+    def _fill_videos(self, videos, status=None) -> None:
+        """填作品表（缓存/联网结果共用）。status 为 None 时列显示「…」待定。"""
         self._videos = list(videos or [])
+        # 封面墙同步填一份（列表 + 封面墙两个视图共用同一批数据）
+        try:
+            self.wall.set_items(
+                self._videos,
+                {k: (1 if v != "none" else 0)
+                 for k, (v, _p) in (status or {}).items()} if status else None)
+        except Exception:                                   # noqa: BLE001
+            pass
         self.table_videos.blockSignals(True)
         self.table_videos.setRowCount(0)
         for v in self._videos:
@@ -604,14 +834,85 @@ class TangxinPage(Page):
             self.table_videos.setItem(r, 0, chk)
             self.table_videos.setItem(r, 1, QTableWidgetItem(v.title))
             self.table_videos.setItem(r, 2, QTableWidgetItem(v.duration or "-"))
-            st, _p = (status or {}).get(str(v.vid), ("none", None))
-            label = {"downloaded": "已下载", "elsewhere": "别处已有"}.get(st, "未下载")
-            item = QTableWidgetItem(label)
-            if st != "none":
-                item.setData(Qt.ItemDataRole.UserRole, "done")
+            if status is None:
+                item = QTableWidgetItem("…")
+                item.setData(Qt.ItemDataRole.UserRole, "")
+            else:
+                st, _p = (status or {}).get(str(v.vid), ("none", None))
+                item = self._status_item(st)
             self.table_videos.setItem(r, 3, item)
             self.table_videos.setItem(r, 4, QTableWidgetItem(str(v.vid)))
         self.table_videos.blockSignals(False)
+
+    def load_videos(self, actor, force: bool = False) -> None:
+        """加载某演员的作品：缓存优先秒开，后台联网增量补新作品。
+
+        缓存里已经有该演员的作品时，先秒开填表并立刻算一次本地状态；
+        后台抓完再把新增的补进去（只增不改，不闪烁）。
+        """
+        if not self._ensure_backend():
+            return
+        self.table_videos.setRowCount(0)
+        ns = self._ns
+
+        shown = 0
+        if not force:
+            cached = self._cached_videos(actor)
+            if cached:
+                self._fill_videos(cached)
+                shown = len(cached)
+        self._videos_cached = shown > 0
+        self.lbl_q.setText(
+            f"缓存 {shown} 部，后台增量同步…" if shown else f"抓取 {actor.name} 的作品…")
+        # 缓存先填 ⇒ 本地状态马上就能算出来（不依赖网络）
+        if shown:
+            self._refresh_local_status()
+
+        def _run(progress=None):
+            crawler = ns.crawler.TangXinCrawler()
+            try:
+                videos = crawler.fetch_actor_videos(actor, 0, progress=progress)
+            finally:
+                try:
+                    crawler.close()
+                except Exception:
+                    pass
+            try:
+                ns.cache.upsert_videos(actor.slug, actor.name, videos)
+            except Exception:                               # noqa: BLE001
+                pass
+            status = {}
+            try:
+                out_base = settings().get("tangxin.output_base", "")
+                status = ns.existing.get_index().status_map(videos, out_base)
+            except Exception:                               # noqa: BLE001
+                status = {}
+            return videos, status, shown
+
+        task = Task(_run, want_progress=True)
+        task.progress.connect(lambda p, t: self.lbl_q.setText(t or "抓取作品…"))
+        task.done.connect(self._videos_done)
+        task.failed.connect(self._videos_fail)
+        CENTER.start(task)
+
+    def _videos_done(self, payload) -> None:
+        videos, status, _shown = payload
+        self._videos_cached = False
+        self._fill_videos(videos, status)
+        self._summarize_videos()
+
+    def _videos_fail(self, tb: str) -> None:
+        # 缓存兜底：已经用缓存填过表了，就别把表清掉
+        if getattr(self, "_videos_cached", False) and self._videos:
+            self.lbl_q.setText(f"增量同步失败，仍显示缓存 {len(self._videos)} 部")
+            self._refresh_local_status()
+            self._summarize_videos()
+            self.notify("联网同步失败，当前显示本地缓存", "warn")
+            return
+        self.lbl_q.setText("作品抓取失败")
+        self.notify((tb or "").splitlines()[-1][:160] if tb else "抓取失败", "err")
+
+    def _summarize_videos(self) -> None:
         done = sum(1 for r in range(self.table_videos.rowCount())
                    if (self.table_videos.item(r, 3) or QTableWidgetItem()).data(
                        Qt.ItemDataRole.UserRole) == "done")
@@ -662,6 +963,79 @@ class TangxinPage(Page):
         self.notify(f"扫描完成：本地已有 {int(n or 0)} 个文件", "ok")
         self._refresh_local_status()
 
+    # ------------------------------------------------------ 已知目录管理
+    def manage_dirs(self) -> None:
+        """管理扫描根目录（存 tangxin.db，不再只存 settings.json）。
+
+        为什么要能加：用户的成品常分散在本机 + NAS + 移动硬盘。没配目录 ⇒
+        索引建不起来 ⇒ 每个作品都被判成"未下载" ⇒ 重复下载。
+        """
+        if not self._ensure_backend():
+            return
+        from PyQt6.QtWidgets import (
+            QDialog, QDialogButtonBox, QFileDialog, QListWidget, QMessageBox,
+        )
+
+        idx = self._ns.existing.get_index()
+        dirs = list(getattr(idx, "known_dirs", []) or [])
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("已知扫描目录（存进 tangxin.db）")
+        dlg.resize(560, 360)
+        lay = QVBoxLayout(dlg)
+        tip = QLabel("这些目录下的成品会被扫进索引；下载前先查索引，已存在的直接跳过。")
+        tip.setObjectName("Muted")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        lst = QListWidget()
+        for d in dirs:
+            lst.addItem(d)
+        lay.addWidget(lst, 1)
+
+        def _add() -> None:
+            p = QFileDialog.getExistingDirectory(dlg, "选择要纳入扫描的目录", "")
+            if not p:
+                return
+            np = os.path.normpath(p)
+            for i in range(lst.count()):
+                if os.path.normpath(lst.item(i).text()) == np:
+                    return
+            lst.addItem(np)
+
+        def _remove() -> None:
+            row = lst.currentRow()
+            if row >= 0:
+                lst.takeItem(row)
+
+        row_b = QHBoxLayout()
+        b_add = QPushButton("添加目录…")
+        b_add.clicked.connect(_add)
+        b_del = QPushButton("移除选中")
+        b_del.setObjectName("Danger")
+        b_del.clicked.connect(_remove)
+        row_b.addWidget(b_add)
+        row_b.addWidget(b_del)
+        row_b.addStretch(1)
+        lay.addLayout(row_b)
+
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        lay.addWidget(box)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_dirs = [lst.item(i).text() for i in range(lst.count())]
+        try:
+            self._ns.existing.apply_known_dirs(new_dirs)
+        except Exception as exc:                            # noqa: BLE001
+            self.notify(f"保存目录失败：{exc}", "err")
+            return
+        self.notify(f"已保存 {len(new_dirs)} 个扫描目录到数据库", "ok")
+        # 目录变了 ⇒ 旧索引不可信，立即重扫一次
+        self.scan_dirs()
+
     def _scan_failed(self, tb: str) -> None:
         self.btn_scan.setEnabled(True)
         self.lbl_q.setText("扫描失败")
@@ -688,18 +1062,20 @@ class TangxinPage(Page):
 
     def _apply_status_map(self, status) -> None:
         status = status or {}
+        # 封面墙的「已下载」角标跟表格用同一份状态（网格按 vid 匹配）
+        try:
+            self.wall.refresh_status(
+                {k: (1 if v != "none" else 0) for k, (v, _p) in status.items()})
+        except Exception:                                   # noqa: BLE001
+            pass
         self.table_videos.blockSignals(True)
         for r, v in enumerate(self._videos):
-            item = self.table_videos.item(r, 3)
-            if item is None:
-                continue
+            if r >= self.table_videos.rowCount():
+                break
             st, _p = status.get(str(v.vid), ("none", None))
-            item.setText({"downloaded": "已下载",
-                          "elsewhere": "别处已有"}.get(st, "未下载"))
-            item.setData(Qt.ItemDataRole.UserRole, "done" if st != "none" else "")
+            self.table_videos.setItem(r, 3, self._status_item(st))
         self.table_videos.blockSignals(False)
-        self._apply_video_filter()
-        self._update_pick()
+        self._summarize_videos()   # 内含 filter + 选中数统计
 
     def _visible_rows(self):
         for r in range(self.table_videos.rowCount()):
@@ -740,24 +1116,11 @@ class TangxinPage(Page):
         if not item:
             return
         v = item.data(Qt.ItemDataRole.UserRole)
-        if not v:
-            return
-        # 糖心的 Video 自带 m3u8_url（CDN 拼接，不联网），直接当预览直链用；
-        # 面板检测到 .m3u8 会自动用 ffmpeg 截前 60 秒转封装后内嵌播。
-        m3u8 = ""
-        try:
-            m3u8 = v.m3u8_url or ""
-        except Exception:  # noqa: BLE001
-            m3u8 = ""
-        # 注意不要把 m3u8 直接塞进 video：那会在"选中行"时就触发 ffmpeg 转封装
-        # （等于自动下 60 秒），改成只给 resolver，用户点「在线播放」才准备。
-        self.preview.preview(
-            title=getattr(v, "title", "") or "",
-            thumb=getattr(v, "cover_url", "") or None,
-            local_dir=settings().get("tangxin.output_base", "") or None,
-            local_hint=getattr(v, "title", "") or "",
-            resolver=(lambda u=m3u8: u) if m3u8 else None,
-        )
+        if v:
+            self._preview_video(v)
+
+    def _preview_video(self, v) -> None:
+        """占位：内置预览面板已按用户要求屏蔽（保留方法避免旧调用报错）。"""
 
     def _picked(self):
         out = []

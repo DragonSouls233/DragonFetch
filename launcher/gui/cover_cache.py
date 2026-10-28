@@ -135,6 +135,58 @@ class CoverCache(QObject):
     def has_memory(self, key: object) -> bool:
         return self._mem_get(key) is not None
 
+    def warm(self, pairs, workers: int = 6, on_progress=None) -> dict:
+        """批量把封面**提前下载**到磁盘（只写盘，不解码、不占内存）。
+
+        用户诉求："封面可以提前下载到数据库同目录下面进行保存"。
+        列表里几百张封面如果都等滚动到眼前才抓，翻页就是一片灰块；
+        这里一次并发抓完写进缓存目录，下次打开全部秒开（走磁盘命中）。
+
+        pairs: ``[(key, url), ...]``；已在磁盘上的直接跳过。
+        返回 ``{"ok": n, "skip": m, "fail": k}``。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        pairs = [(k, (u or "").strip()) for k, u in (pairs or []) if (u or "").strip()]
+        total = len(pairs)
+        done = [0]
+        stat = {"ok": 0, "skip": 0, "fail": 0}
+        if not total:
+            return stat
+
+        def _one(k: object, url: str) -> None:
+            try:
+                if self._read_disk(k) is not None:
+                    stat["skip"] += 1
+                else:
+                    raw = self._fetch(url)
+                    plain = raw
+                    if raw and self._decode is not None:
+                        try:
+                            got = self._decode(raw)
+                        except Exception:               # noqa: BLE001
+                            got = None
+                        if got:
+                            plain = got
+                    if plain and _looks_like_image(plain):
+                        self._write_disk(k, plain)
+                        stat["ok"] += 1
+                    else:
+                        stat["fail"] += 1
+            except Exception:                           # noqa: BLE001
+                stat["fail"] += 1
+            finally:
+                done[0] += 1
+                if on_progress is not None:
+                    try:
+                        on_progress(done[0], total)
+                    except Exception:                   # noqa: BLE001
+                        pass
+
+        with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+            list(ex.map(lambda p: _one(p[0], p[1]), pairs))
+        return stat
+
     def clear_memory(self) -> None:
         with self._lock:
             self._mem.clear()

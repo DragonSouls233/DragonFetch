@@ -34,6 +34,8 @@ BASE_NAV = [
     ("madouqu", "◍", "麻豆磁力", "下载器"),
     ("yttiktok", "▶", "映取 · YT/TikTok", "下载器"),
     ("nav", "✦", "导航页 · 黄视频", "下载器"),
+    # 浏览器独立成入口：媒体库各模块不再内嵌 Chromium（2026-10-29）
+    ("browser", "⊞", "浏览器", "工作台"),
     ("navsync", "⇄", "地址同步", "系统"),
     ("library", "▤", "库管理", "系统"),
     ("settings", "⚙", "设置", "系统"),
@@ -84,12 +86,14 @@ def _factory(key: str) -> Callable[[], QWidget]:
         from .pages.navsync import NavSyncPage
         from .pages.library import LibraryPage
         from .pages.settings_page import SettingsPage
+        from .pages.browser_page import BrowserPage
         _FACTORIES.update({
             "home": HomePage, "tangxin": TangxinPage, "huangguo": HuangguoPage,
             "duanju": DuanjuPage,
             "jiuse": JiusePage, "madouqu": MadouquPage,
             "yttiktok": YtTiktokPage, "nav": NavPage, "navsync": NavSyncPage,
             "library": LibraryPage, "settings": SettingsPage,
+            "browser": BrowserPage,
         })
     return _FACTORIES[key]
 
@@ -303,6 +307,7 @@ class MainWindow(QMainWindow):
         self._pages: Dict[str, QWidget] = {}
         self._log_dialog: LogDialog | None = None
         self._navsync_task: Task | None = None
+        self._ytdlp_version_task: Task | None = None
         self.toast = Toast(central)
 
         self._build_statusbar()
@@ -311,6 +316,9 @@ class MainWindow(QMainWindow):
 
         self.switch_page(s.get("window.last_page", "home") or "home")
         self._refresh_side_status()
+        # 先让主窗口完成构造并交还事件循环，再在后台启动 onefile 版 yt-dlp。
+        # 它的 ``--version`` 首次执行约 3.7 秒，绝不能挡住首帧。
+        QTimer.singleShot(0, self._start_ytdlp_version_check)
 
         # 每次打开都同步一次地址并做直连校验：糖心/黄果/麻豆/九色四个模块
         # 的域名靠这一步保鲜，直连能过就把它们的代理开关关掉。
@@ -366,7 +374,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(bar)
 
         self.lbl_proxy = QLabel("代理：-")
-        self.lbl_ytdlp = QLabel("yt-dlp：-")
+        self.lbl_ytdlp = QLabel("yt-dlp：检测中…")
         self.lbl_tasks = QLabel("任务：0")
         self.lbl_root = QLabel(f"数据：{paths.rel(paths.DATA)}")
         self.btn_log = QPushButton("日志")
@@ -388,10 +396,26 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_proxy.setText("代理：关闭（直连）")
             self.sidebar.set_status("代理：关闭 · " + navsync.last_run_text())
-        try:
-            self.lbl_ytdlp.setText(f"yt-dlp：{backend.ytdlp_version()}")
-        except Exception:
-            self.lbl_ytdlp.setText("yt-dlp：-")
+        self.lbl_ytdlp.setText(
+            f"yt-dlp：{backend.cached_ytdlp_version('检测中…')}")
+
+    def _start_ytdlp_version_check(self) -> None:
+        """在后台查询 yt-dlp 版本并回填状态栏。"""
+        cached = backend.cached_ytdlp_version("")
+        if cached:
+            self.lbl_ytdlp.setText(f"yt-dlp：{cached}")
+            return
+        if self._ytdlp_version_task is not None and self._ytdlp_version_task.isRunning():
+            return
+        self.lbl_ytdlp.setText("yt-dlp：检测中…")
+        task = Task(backend.ytdlp_version)
+        task.done.connect(self._on_ytdlp_version_ready)
+        task.failed.connect(lambda _tb: self.lbl_ytdlp.setText("yt-dlp：不可用"))
+        self._ytdlp_version_task = task
+        CENTER.start(task)
+
+    def _on_ytdlp_version_ready(self, version: object) -> None:
+        self.lbl_ytdlp.setText(f"yt-dlp：{str(version or '未知')}")
 
     def refresh_side_status(self) -> None:
         """对外（各页面同步完地址后）刷新状态栏与侧栏摘要。"""
@@ -403,7 +427,18 @@ class MainWindow(QMainWindow):
         if self._navsync_task is not None and self._navsync_task.isRunning():
             return
         self.sidebar.set_status("地址同步中…")
-        task = Task(navsync.sync_all)
+
+        def _run() -> dict:
+            """记录同步前域名，供主线程明确展示自动改写痕迹。"""
+            try:
+                before = str(backend.huangguo_site_meta().get("base_url") or "")
+            except Exception:  # noqa: BLE001 - 地址同步本身仍应继续
+                before = ""
+            result = dict(navsync.sync_all() or {})
+            result["huangguo_url_before"] = before
+            return result
+
+        task = Task(_run)
         task.done.connect(self._on_navsync_done)
         task.failed.connect(self._on_navsync_failed)
         self._navsync_task = task
@@ -420,6 +455,17 @@ class MainWindow(QMainWindow):
         else:
             self.notify("地址同步失败：四个模块都没拿到可用地址，已沿用上次配置",
                         "warn")
+
+        # 地址同步是有意保留的启动行为；若它替用户切换了黄果域名，则同时写入
+        # DragonFetch 日志并给非阻塞 Toast，不能只在 hgcore 私有日志里静默发生。
+        before = str(res.get("huangguo_url_before") or "").rstrip("/")
+        hg = (res.get("targets") or {}).get("huangguo") or {}
+        after = str(hg.get("url") or "").rstrip("/")
+        if before and after and before != after and hg.get("ok"):
+            text = f"黄果域名已自动切换：{before} → {after}"
+            LOG.info(text)
+            self.notify(text, "warn")
+
         page = self._pages.get("navsync")
         if page is not None and hasattr(page, "_fill"):
             try:

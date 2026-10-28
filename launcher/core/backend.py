@@ -32,6 +32,12 @@ _LOCK = threading.RLock()
 _CACHE: dict[str, SimpleNamespace] = {}
 _prepared = False
 
+# yt-dlp 是 PyInstaller onefile，可执行一次 ``--version`` 也会先自解压，实测约
+# 3.7 秒。版本在同一进程内不会变化，因此单独加锁并永久缓存首次结果：既避免
+# 并发的首页/状态栏各启动一个子进程，也不占用后端模块导入用的 ``_LOCK``。
+_YTDLP_VERSION_LOCK = threading.Lock()
+_YTDLP_VERSION_CACHE: str | None = None
+
 
 def prepare() -> None:
     """注入环境变量与 sys.path（幂等）。"""
@@ -95,6 +101,10 @@ def tangxin() -> SimpleNamespace:
                 existing=_imp("tangxin.existing"),
                 ytdlp_engine=_imp("tangxin.ytdlp_engine"),
                 layout=_imp("tangxin.layout"),
+                # 内容缓存层（SQLite）：演员云/作品列表缓存优先，避免每次开软件
+                # 都重新联网抓 800+ 位演员。模块一直都在，但没暴露 ⇒ 界面层
+                # 用不到 ⇒ 表现为「缓存机制好像都没有」。
+                cache=_imp("tangxin.cache"),
             )
     ns = _CACHE["tangxin"]
     apply_tangxin_settings(ns)
@@ -587,15 +597,36 @@ def warm_up() -> list:
     return done
 
 
+def cached_ytdlp_version(default: str = "检测中…") -> str:
+    """返回已缓存的 yt-dlp 版本；尚未检测时绝不启动或等待子进程。"""
+    # 单个对象引用的读取在 CPython 中是原子的；这里刻意不取查询锁，否则后台
+    # 正在跑 3.7 秒子进程时，UI 为读占位文本也会被同一把锁卡住。
+    value = _YTDLP_VERSION_CACHE
+    return value if value is not None else default
+
+
 def ytdlp_version() -> str:
-    import subprocess
-    exe = paths.bin_path("yt-dlp.exe")
-    try:
-        out = subprocess.run([exe, "--version"], capture_output=True, text=True,
-                             timeout=10)
-        return (out.stdout or "").strip() or "未知"
-    except Exception:
-        return "不可用"
+    """查询并缓存 yt-dlp 版本。
+
+    此函数本身仍是阻塞调用，供后台 :class:`~launcher.core.tasks.Task` 与命令行
+    自检使用；GUI 主线程只能读取 :func:`cached_ytdlp_version`，再异步调用本函数。
+    """
+    global _YTDLP_VERSION_CACHE
+    with _YTDLP_VERSION_LOCK:
+        if _YTDLP_VERSION_CACHE is not None:
+            return _YTDLP_VERSION_CACHE
+
+        import subprocess
+
+        exe = paths.bin_path("yt-dlp.exe")
+        try:
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                                 timeout=10)
+            version = (out.stdout or "").strip() or "未知"
+        except Exception:
+            version = "不可用"
+        _YTDLP_VERSION_CACHE = version
+        return version
 
 
 # ------------------------------------------------------------------ 概览统计

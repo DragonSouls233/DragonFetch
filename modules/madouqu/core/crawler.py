@@ -41,15 +41,21 @@ class MadouquCrawler:
         self.config = config or {}
         
         # 备用域名列表（当主域名失败时自动切换）
+        # 实测（2026-10-28）：
+        #   madouqu.com  直连 200 / 108KB / 1.3s  ← 只有这个真能用
+        #   madouqu.cc   代理 200 但正文仅 472B（空壳页），直连证书错误
+        #   madouqu.sbs  直连 CONNECT 失败、代理 TLS 失败（全挂）
+        # 所以 .com 必须排第一，其余保留仅作域名轮换时的兜底。
         self.fallback_urls = [
+            'https://madouqu.com',
             'https://madouqu.sbs',
             'https://madouqu.club',
             'https://madouqu.cc',
             'https://madouqu.net',
             'https://madouqu.org',
         ]
-        
-        self.base_url = self.config.get('base_url', 'https://madouqu.sbs')
+
+        self.base_url = self.config.get('base_url', 'https://madouqu.com')
         
         # 网络配置
         self.timeout = self.config.get('timeout', 30)
@@ -82,8 +88,32 @@ class MadouquCrawler:
         Returns:
             是否可用
         """
+        # 先用 curl_cffi 探（与项目其他模块一致）。
+        # 实测 2026-10-28：madouqu.com 用 curl_cffi(impersonate=chrome) 1.3s 就 200，
+        # 而 requests 直连要 10~30s —— 原来 10s 超时会把明明可用的域名误判成
+        # "所有域名都不可用"，进而让 find_working_url() 返回 None、上层直接报错。
         try:
-            response = self.session.get(url, timeout=10, allow_redirects=True)
+            from curl_cffi import requests as _cr
+
+            kw: Dict[str, Any] = {"timeout": 15, "impersonate": "chrome",
+                                  "allow_redirects": True}
+            proxy_url = (self.config.get('proxy') or {}).get('url') \
+                if (self.config.get('proxy') or {}).get('enabled') else None
+            if proxy_url:
+                kw["proxy"] = proxy_url
+            r = _cr.get(url, **kw)
+            if 200 <= r.status_code < 300:
+                logger.info(f"域名可用: {url} (curl_cffi 状态码: {r.status_code})")
+                return True
+            logger.warning(f"域名返回非200状态: {url} (状态码: {r.status_code})")
+            return False
+        except ImportError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"curl_cffi 探测失败，回退 requests: {url} - {e}")
+
+        try:
+            response = self.session.get(url, timeout=20, allow_redirects=True)
             # 200-299 都算成功
             if 200 <= response.status_code < 300:
                 logger.info(f"域名可用: {url} (状态码: {response.status_code})")

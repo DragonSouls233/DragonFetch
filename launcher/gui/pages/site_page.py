@@ -145,14 +145,22 @@ class SitePage(Page):
         btn_dir.clicked.connect(lambda: open_path(self._base_dir))
         self.header.add_action(btn_dir)
 
-        self.body.addWidget(self._card_toolbar(), 0)
-        self.body.addWidget(self._build_table(), 1)
-        self.body.addWidget(self._build_actions(), 0)
-        self.body.addWidget(self._build_log(), 0)
-        self.body.addWidget(self._card_download(), 0)
+        # 日志不再占页面位置：只留对象做输出（内容同时进全局「运行日志」窗口），
+        # 入口移到设置页，避免抢走下载列表的空间。
+        self.log = LogPanel()
+        self.log.setVisible(False)
+
         self.preview = PreviewPane()
         self.preview.setMinimumHeight(320)
-        self.body.addWidget(self.preview, 0)
+        left_col = QWidget()
+        lv = QVBoxLayout(left_col)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(10)
+        lv.addWidget(self._card_toolbar(), 0)
+        lv.addWidget(self._build_table(), 1)
+        lv.addWidget(self._build_actions(), 0)
+        lv.addWidget(self._card_download(), 0)
+        self.attach_preview(left_col, self.preview)
 
     def _card_toolbar(self) -> QWidget:
         card = Card()
@@ -570,10 +578,17 @@ class SitePage(Page):
         if row < 0 or row >= len(self._items):
             return
         it = self._items[row]
+        url = (it.get("url") or "").strip()
+        direct = (it.get("direct") or "").strip()
+        resolver = None
+        if url and not direct:
+            # 未解析过直链时，点「在线播放」再后台解析（crawl 阶段解析会拖慢列表）
+            resolver = lambda u=url: backend.resolve_direct(u)  # noqa: E731
         self.preview.preview(
-            title=it.get("title", "") or it.get("url", "") or "",
+            title=it.get("title", "") or url or "",
             thumb=it.get("thumbnail") or it.get("cover") or it.get("poster") or None,
-            video=it.get("direct") or None,
+            video=direct or None,
+            resolver=resolver,
         )
 
     def _row_checked(self, row: int) -> bool:

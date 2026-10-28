@@ -214,7 +214,6 @@ class YtTiktokPage(Page):
             ["选择", "标题", "站点", "时长", "上传者", "状态"],
             [52, 400, 90, 80, 160, 120])
         rl.addWidget(self.table, 1)
-        self.body.addWidget(res_card, 1)
 
         # ---------------- 队列
         q_card = Card()
@@ -230,14 +229,21 @@ class YtTiktokPage(Page):
         qh.addWidget(self.lbl_q, 1)
         ql.addLayout(qh)
         self.table_q = make_table(["视频", "状态", "进度"], [460, 220, 220])
-        self.table_q.setMinimumHeight(120)
+        # 队列不再占大块：默认两行高，下载为主但不喧宾夺主
+        self.table_q.setMinimumHeight(96)
+        self.table_q.setMaximumHeight(200)
         ql.addWidget(self.table_q)
-        self.body.addWidget(q_card)
 
-        # ---------------- 内置预览
+        # ---------------- 左：解析结果 + 队列 / 右：内置预览
         self.preview = PreviewPane()
         self.preview.setMinimumHeight(320)
-        self.body.addWidget(self.preview, 0)
+        left_col = QWidget()
+        lv = QVBoxLayout(left_col)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(14)
+        lv.addWidget(res_card, 1)
+        lv.addWidget(q_card, 0)
+        self.attach_preview(left_col, self.preview)
         self.table.itemSelectionChanged.connect(self._preview_selected)
 
     # ---------------------------------------------------------------- 工具

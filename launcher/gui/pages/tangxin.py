@@ -16,7 +16,7 @@ import re
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QSplitter,
@@ -176,10 +176,9 @@ class TangxinPage(Page):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab_crawl(), "采集与下载")
         self.tabs.addTab(self._tab_records(), "下载记录")
-        self.body.addWidget(self.tabs, 1)
         self.preview = PreviewPane()
         self.preview.setMinimumHeight(320)
-        self.body.addWidget(self.preview, 0)
+        self.attach_preview(self.tabs, self.preview)
 
         self._load_route_choices()
         self._update_pick()
@@ -324,10 +323,28 @@ class TangxinPage(Page):
         qh.addWidget(self.btn_stop)
         ql.addLayout(qh)
         self.table_queue = make_table(["视频", "状态", "进度"], [440, 200, 240])
-        self.table_queue.setMinimumHeight(132)
+        # 队列只留"看得见进度"的高度即可：主战场是上面的作品库和右侧预览，
+        # 队列占太高会把两者挤扁。可折叠，展开时给到 240。
+        self.table_queue.setMinimumHeight(88)
+        self.table_queue.setMaximumHeight(160)
         ql.addWidget(self.table_queue)
+
+        self.btn_queue_fold = QPushButton("展开")
+        self.btn_queue_fold.setObjectName("Ghost")
+        self.btn_queue_fold.clicked.connect(self._toggle_queue)
+        qh.addWidget(self.btn_queue_fold)
+        self._queue_expanded = False
         lay.addWidget(queue_card)
         return w
+
+    def _toggle_queue(self) -> None:
+        self._queue_expanded = not getattr(self, "_queue_expanded", False)
+        if self._queue_expanded:
+            self.table_queue.setMaximumHeight(240)
+            self.btn_queue_fold.setText("收起")
+        else:
+            self.table_queue.setMaximumHeight(160)
+            self.btn_queue_fold.setText("展开")
 
     # ---------------------------------------------------------------- 记录页
     def _tab_records(self) -> QWidget:
@@ -378,6 +395,12 @@ class TangxinPage(Page):
             self.apply_route()
         if self.tabs.currentIndex() == 1:
             self.reload_records()
+        # 首次进入就自动拉演员云：否则页面一片空白，用户以为"没内容/坏了"。
+        # 只自动跑一次，之后由「加载演员云」按钮决定是否刷新。
+        if not getattr(self, "_auto_loaded", False):
+            self._auto_loaded = True
+            if self.list_actors.count() == 0:
+                QTimer.singleShot(250, self.load_actors)
 
     def _ensure_backend(self) -> bool:
         if self._ns is not None:
@@ -639,11 +662,21 @@ class TangxinPage(Page):
         v = item.data(Qt.ItemDataRole.UserRole)
         if not v:
             return
+        # 糖心的 Video 自带 m3u8_url（CDN 拼接，不联网），直接当预览直链用；
+        # 面板检测到 .m3u8 会自动用 ffmpeg 截前 60 秒转封装后内嵌播。
+        m3u8 = ""
+        try:
+            m3u8 = v.m3u8_url or ""
+        except Exception:  # noqa: BLE001
+            m3u8 = ""
+        # 注意不要把 m3u8 直接塞进 video：那会在"选中行"时就触发 ffmpeg 转封装
+        # （等于自动下 60 秒），改成只给 resolver，用户点「在线播放」才准备。
         self.preview.preview(
             title=getattr(v, "title", "") or "",
             thumb=getattr(v, "cover_url", "") or None,
             local_dir=settings().get("tangxin.output_base", "") or None,
             local_hint=getattr(v, "title", "") or "",
+            resolver=(lambda u=m3u8: u) if m3u8 else None,
         )
 
     def _picked(self):

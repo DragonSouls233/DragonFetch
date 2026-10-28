@@ -25,9 +25,28 @@ _IMG_DATA_SRC_RE = re.compile(
     r'<img[^>]+?(?:data-src|data-original|data-lazy-src)=["\']([^"\']+)["\']', re.I)
 _IMG_SRC_RE = re.compile(r'<img[^>]+?src=["\']([^"\']+)["\']', re.I)
 
-_VIDEO_HINTS = ("/v/", "/video", "view_video", "voddetail", "vodplay",
+_VIDEO_HINTS = ("/vod/view/", "/video/viewhd/", "/v/", "/video",
+                "view_video", "voddetail", "vodplay",
                 "/archives/", "/post/", "/watch")
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+# 91 系真实卡片：<div class="video-elem"> 里
+#   ① <a class="display" href="/vod/view/XXX">  内含 <div class="img" style="background-image:url(...)">
+#   ② <a class="title" href="/vod/view/XXX">标题</a>
+#   ③ <small class="layer">00:03:45</small>
+#   ④ 作者: <a href="/dashen/XXX">
+# 注意封面**不是 <img>**，而是 background-image，所以原来基于 <img> 的取法必然全空。
+_ELEM_SPLIT_RE = re.compile(r'<div class="video-elem">', re.I)
+_BG_URL_RE = re.compile(
+    r'background-image\s*:\s*url\(\s*[\'"]?([^\'")]+)', re.I)
+_TITLE_A_RE = re.compile(
+    r'<a[^>]+class="[^"]*\btitle\b[^"]*"[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+    re.I | re.S)
+_ANY_A_RE = re.compile(
+    r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
+_DUR_RE = re.compile(r'<small[^>]+class="[^"]*\blayer\b[^"]*"[^>]*>(.*?)</small>',
+                     re.I | re.S)
+_AUTHOR_RE = re.compile(r'href=["\']/dashen/([^"\']+)["\']', re.I)
 
 
 def _abs(base: str, href: str) -> str:
@@ -47,33 +66,80 @@ def page_title(html: str) -> str:
     return re.sub(r"\s+", " ", _TAG_RE.sub("", m.group(1))).strip()[:120]
 
 
-def parse_list(html: str, base_url: str) -> List[dict]:
-    """从列表页抽视频条目：``[{title, url}]``（按 URL 去重）。"""
+def _parse_cards(html: str, base_url: str) -> List[dict]:
+    """按 91 系 ``div.video-elem`` 卡片解析（封面走 background-image）。"""
     out: List[dict] = []
-    seen = set()
+    parts = _ELEM_SPLIT_RE.split(html or "")
+    for seg in parts[1:]:            # parts[0] 是首张卡片之前的杂项
+        href = title = ""
+        m = _TITLE_A_RE.search(seg)
+        if m:
+            href, raw = m.group(1), m.group(2)
+            title = re.sub(r"\s+", " ", _TAG_RE.sub("", raw)).strip()
+        if not href:
+            # 卡片内第一个视频详情链接（display 层）
+            for am in _ANY_A_RE.finditer(seg):
+                if any(h in am.group(1).lower()
+                       for h in ("/vod/view/", "/video/viewhd/")):
+                    href = am.group(1)
+                    title = re.sub(r"\s+", " ", _TAG_RE.sub("", am.group(2))).strip()
+                    break
+        if not href:
+            continue
+        low = href.lower()
+        if not any(h in low for h in ("/vod/view/", "/video/viewhd/", "/video/")):
+            continue
+        url = _abs(base_url, href).split("?")[0]
+
+        cover = ""
+        mb = _BG_URL_RE.search(seg)          # ① background-image: url(...)
+        if mb:
+            cand = mb.group(1).strip()
+            if cand and not cand.startswith("data:"):
+                cover = _abs(base_url, cand)
+        if not cover:                        # ② 退回落懒加载/src 的 <img>
+            ms = _IMG_DATA_SRC_RE.search(seg) or _IMG_SRC_RE.search(seg)
+            if ms:
+                cand = ms.group(1).strip()
+                if cand and not cand.startswith("data:") \
+                        and not cand.lower().endswith(".svg"):
+                    cover = _abs(base_url, cand)
+
+        dur = ""
+        md = _DUR_RE.search(seg)
+        if md:
+            dur = re.sub(r"\s+", " ", _TAG_RE.sub("", md.group(1))).strip()[:12]
+        author = ""
+        ma = _AUTHOR_RE.search(seg)
+        if ma:
+            author = ma.group(1)
+        if not title:
+            title = url.rstrip("/").split("/")[-1]
+        out.append({"title": title[:120], "url": url, "cover": cover,
+                    "duration": dur, "author": author})
+    return out
+
+
+def _parse_anchors(html: str, base_url: str) -> List[dict]:
+    """兜底：通用 ``<a>`` 扫描（搜索页/结构不同的页面）。"""
+    out: List[dict] = []
     for m in _ANCHOR_RE.finditer(html or ""):
         href = (m.group(1) or "").strip()
         if not href or href.startswith(("javascript:", "#", "mailto:")):
             continue
         low = href.lower()
         if not any(h in low for h in _VIDEO_HINTS):
-            # 纯数字 .html 也是常见详情页
             if not re.search(r"/\d{3,}\.html?$", low):
                 continue
         url = _abs(base_url, href).split("?")[0]
-        if url in seen:
-            continue
-        seen.add(url)
         text = re.sub(r"\s+", " ", _TAG_RE.sub("", m.group(2) or "")).strip()
         inner = m.group(2) or ""
-        # 只在当前 <a> 内部、以及其后一小段（不越过下一个 <a>）里找图，
-        # 否则会把相邻条目的图串到本条目上。
+        # 窗口不越过下一个 <a>，否则会把相邻条目的图串过来
         nxt = html.find("<a", m.end())
         win_end = min(m.end() + 400, nxt if nxt != -1 else len(html))
         block = html[m.start():win_end]
         img = _IMG_RE.search(inner) or _IMG_RE.search(block)
         title = text or (img.group(1) if img else "") or url.rstrip("/").split("/")[-1]
-        # 封面优先取懒加载属性，再退回 src；排除 data: 内联图与 .svg 占位
         cover = ""
         m_img = (_IMG_DATA_SRC_RE.search(inner) or _IMG_SRC_RE.search(inner)
                  or _IMG_DATA_SRC_RE.search(block) or _IMG_SRC_RE.search(block))
@@ -81,7 +147,26 @@ def parse_list(html: str, base_url: str) -> List[dict]:
             cand = (m_img.group(1) or "").strip()
             if cand and not cand.startswith("data:") and not cand.lower().endswith(".svg"):
                 cover = _abs(base_url, cand)
-        out.append({"title": title[:120], "url": url, "cover": cover})
+        out.append({"title": title[:120], "url": url, "cover": cover,
+                    "duration": "", "author": ""})
+    return out
+
+
+def parse_list(html: str, base_url: str) -> List[dict]:
+    """从列表页抽视频条目（按 URL 去重）。
+
+    优先走 91 系 ``video-elem`` 卡片（能拿到标题/封面/时长/作者），
+    抽不到再回落到通用 ``<a>`` 扫描，保证别的页面形态也能用。
+    """
+    items = _parse_cards(html, base_url) or _parse_anchors(html, base_url)
+    out: List[dict] = []
+    seen = set()
+    for it in items:
+        u = it.get("url") or ""
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(it)
     return out
 
 

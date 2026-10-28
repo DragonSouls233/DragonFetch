@@ -191,6 +191,12 @@ class SettingsPage(Page):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         il.addWidget(self.lbl_info)
         row3 = QHBoxLayout()
+        # 运行日志放在这里：页面里不再让日志占位置，需要看时再开独立窗口，
+        # 且窗口是非模态的——开着日志照样能继续操作主界面。
+        btn_runlog = QPushButton("运行日志")
+        btn_runlog.setObjectName("Primary")
+        btn_runlog.clicked.connect(self.open_log_window)
+        row3.addWidget(btn_runlog)
         for text, target in (("DATA 目录", paths.DATA), ("日志目录", paths.LOGS),
                              ("TEMP 目录", paths.TEMP), ("安装目录", paths.ROOT)):
             b = QPushButton(text)
@@ -295,6 +301,23 @@ class SettingsPage(Page):
             win._refresh_side_status()
         self.notify(f"已保存：{paths.rel(path)}", "ok")
         self._refresh_info()
+
+    def open_log_window(self) -> None:
+        """打开运行日志（非模态独立窗口，开着也能继续操作主界面）。"""
+        win = self.window()
+        if win is not None and win is not self and hasattr(win, "_open_log"):
+            win._open_log()
+            return
+        # 兜底：页面单独运行时自己开一个
+        try:
+            from ..shell import LogDialog
+
+            if getattr(self, "_log_win", None) is None:
+                self._log_win = LogDialog(None)
+            self._log_win.show()
+            self._log_win.raise_()
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"日志窗口打不开：{exc}", "err")
 
     def clean_temp(self) -> None:
         n = 0

@@ -13,7 +13,7 @@ import os
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
     QPushButton, QSpinBox, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -112,11 +112,9 @@ class JiusePage(Page):
         self.tabs.addTab(self._tab_records(), "检测与下载记录")
         self.tabs.currentChanged.connect(
             lambda i: self.reload_records() if i == 1 else None)
-        self.body.addWidget(self.tabs, 1)
-
         self.preview = PreviewPane()
         self.preview.setMinimumHeight(320)
-        self.body.addWidget(self.preview, 0)
+        self.attach_preview(self.tabs, self.preview)
 
     # ---------------------------------------------------------------- 主标签
     def _tab_main(self) -> QWidget:
@@ -313,6 +311,11 @@ class JiusePage(Page):
         if not (st.get("addresses") or []):
             self.lbl_route.setText(
                 "还没有缓存地址。点「刷新最新地址」直连 pages.dev 抓取并探测。")
+        # 首次进入就自动抓一次首页：否则表格恒为 0 条，用户以为站点没内容。
+        if not getattr(self, "_auto_loaded", False):
+            self._auto_loaded = True
+            if self.table.rowCount() == 0:
+                QTimer.singleShot(250, lambda: self.grab_page(""))
 
     def _apply_state(self, st: dict) -> None:
         items = list(st.get("addresses") or [])
@@ -487,9 +490,12 @@ class JiusePage(Page):
         if row < 0 or row >= len(self._items):
             return
         it = self._items[row]
+        url = (it.get("url") or "").strip()
         self.preview.preview(
-            title=it.get("title", "") or it.get("url", "") or "",
+            title=it.get("title", "") or url or "",
             thumb=it.get("cover") or None,
+            # 点「在线播放」时后台解析直链（91 站多为 m3u8，面板会自动转封装后内嵌播）
+            resolver=(lambda u=url: backend.resolve_direct(u)) if url else None,
         )
 
     def _toggle_all(self, state: int) -> None:

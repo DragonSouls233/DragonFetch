@@ -77,7 +77,9 @@ DEFAULTS: Dict[str, Any] = {
     },
     "madouqu": {
         # 麻豆磁力（独立模块）——数据统一落在 DATA/madouqu
-        "base_url": "https://madouqu.sbs",
+        # 实测 2026-10-28：madouqu.com 直连 200（1.3s）；.sbs/.club/.net/.org 全挂，
+        # .cc 代理 200 但正文只有 472B 空壳。默认用 .com。
+        "base_url": "https://madouqu.com",
         "proxy_enabled": True,
         "timeout": 20,
         "max_pages": 5,

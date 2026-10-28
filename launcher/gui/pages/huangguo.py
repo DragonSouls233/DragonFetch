@@ -81,10 +81,9 @@ class HuangguoPage(Page):
         self.tabs.addTab(self._tab_history(), "下载历史")
         self.tabs.addTab(self._tab_sites(), "站点与镜像")
         self.tabs.currentChanged.connect(self._on_tab)
-        self.body.addWidget(self.tabs, 1)
         self.preview = PreviewPane()
         self.preview.setMinimumHeight(320)
-        self.body.addWidget(self.preview, 0)
+        self.attach_preview(self.tabs, self.preview)
 
         self._timer = QTimer(self)
         self._timer.setInterval(900)
@@ -597,8 +596,26 @@ class HuangguoPage(Page):
         d = item.data(Qt.ItemDataRole.UserRole) or {}
         self.preview.preview(
             title=d.get("title", "") or "",
-            thumb=d.get("cover") or None,
+            # 本地库 dramas 表的列名是 cover_url（不是 cover），
+            # 只取 "cover" 会永远拿到 None → 预览面板恒显示"无封面"。
+            thumb=d.get("cover_url") or d.get("cover") or None,
+            resolver=lambda drama=d: self._resolve_play_url(drama),
         )
+
+    def _resolve_play_url(self, drama: dict) -> str:
+        """取该剧第 1 集的播放直链（预览面板「在线播放」用）。"""
+        ns = self._ns
+        if ns is None:
+            return ""
+        ep = 1
+        eps = (self._detail or {}).get("episodes") or []
+        if eps:
+            try:
+                ep = int(eps[0])
+            except (TypeError, ValueError):
+                ep = 1
+        return ns.site_api.get_play_url_for(
+            ns.config.ACTIVE_SITE_ID, drama.get("did"), ep) or ""
 
     def load_detail(self, drama: dict) -> None:
         if not self._ensure():

@@ -28,6 +28,29 @@ class Page(QWidget):
     def build(self) -> None:  # pragma: no cover
         pass
 
+    def attach_preview(self, content, preview, width: int = 430):
+        """把主内容与预览面板装成「左内容 / 右预览」可拖拽分栏。
+
+        预览从原来的"底部一条"改成右侧常驻大栏：预览是主要诉求，
+        下载列表也要看得清，两者用 QSplitter 让用户自己拖比例。
+        """
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QSplitter
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setObjectName("MainSplit")
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(6)
+        split.addWidget(content)
+        split.addWidget(preview)
+        split.setStretchFactor(0, 1)   # 内容区随窗口拉伸
+        split.setStretchFactor(1, 0)   # 预览保持设定宽度
+        preview.setMinimumWidth(300)
+        split.setSizes([1200, width])
+        self.body.addWidget(split, 1)
+        self._main_split = split
+        return split
+
     def on_show(self) -> None:
         """切换到本页时调用（做一次轻量刷新即可）。"""
 

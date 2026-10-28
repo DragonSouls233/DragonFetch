@@ -2,7 +2,7 @@
 # Copyright (C) 2026 龙之魂 (DragonSouls233)
 """
 Madouqu模块 - BT磁力链接爬虫
-独立模块，用于爬取 madouqu.sbs 网站的模特BT资源
+独立模块，用于爬取 madouqu.com 网站的模特BT资源（.com 为 2026-10 实测可用域名）
 """
 from .core.crawler import MadouquCrawler
 from .core.database import MadouquDatabase

@@ -11,8 +11,9 @@ from typing import Callable, Dict
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
-    QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QMainWindow,
+    QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStatusBar,
+    QVBoxLayout, QWidget,
 )
 
 from ..core import backend, navsync, paths
@@ -166,15 +167,71 @@ class Sidebar(QWidget):
 
 
 class LogDialog(QWidget):
+    """运行日志窗（**非模态**）。
+
+    非模态是硬要求：用户开着日志要能继续点主界面的下载/预览。
+    所以这里不 exec()、不 setModal(True)，只是个普通顶层窗口。
+    """
+
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Dialog)
+        # 用 Window 而不是 Dialog：Dialog 在部分平台会跟随父窗口置顶/模态化
+        super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("运行日志")
-        self.resize(820, 460)
+        s = settings()
+        self.resize(int(s.get("logwin.width", 900) or 900),
+                    int(s.get("logwin.height", 480) or 480))
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        bar = QHBoxLayout()
+        tip = QLabel("日志实时追加；本窗口不阻塞主界面，开着也能继续下载/预览。")
+        tip.setObjectName("Muted")
+        bar.addWidget(tip, 1)
+        btn_save = QPushButton("另存为…")
+        btn_save.setObjectName("Ghost")
+        btn_save.clicked.connect(self._save_as)
+        chk_top = QCheckBox("置顶")
+        chk_top.setChecked(bool(s.get("logwin.on_top", False)))
+        chk_top.toggled.connect(self._set_on_top)
+        bar.addWidget(chk_top)
+        bar.addWidget(btn_save)
+        lay.addLayout(bar)
+
         from .widgets import LogPanel
         self.panel = LogPanel()
-        lay.addWidget(self.panel)
+        lay.addWidget(self.panel, 1)
         LOG.message.connect(self.panel.append)
+        self._set_on_top(chk_top.isChecked())
+
+    def _set_on_top(self, on: bool) -> None:
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(on))
+        self.show()          # 改 flag 后必须 show 才生效
+        settings().set("logwin.on_top", bool(on))
+
+    def _save_as(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+
+        from ..core import paths
+
+        out, _ = QFileDialog.getSaveFileName(
+            self, "保存日志", str(paths.LOGS / "ui-log.txt"), "文本 (*.txt)")
+        if not out:
+            return
+        try:
+            # LogPanel 内的文本框是 .view（QPlainTextEdit）
+            text = self.panel.view.toPlainText() if hasattr(self.panel, "view") else ""
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):  # noqa: N802
+        s = settings()
+        s.set("logwin.width", self.width())
+        s.set("logwin.height", self.height())
+        s.save()
+        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):

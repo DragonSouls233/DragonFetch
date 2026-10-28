@@ -410,9 +410,11 @@ def _sync_madouqu(timeout: float, progress=None) -> Dict[str, Any]:
         crawler = bk.madouqu().crawler.MadouquCrawler({"use_selenium": False})
         cands.extend(crawler.fallback_urls or [])
     except Exception:  # noqa: BLE001
-        cands.extend(["https://madouqu.sbs", "https://madouqu.club",
-                      "https://madouqu.cc", "https://madouqu.net",
-                      "https://madouqu.org"])
+        # 实测 2026-10-28：只有 .com 可用（直连 200 / 108KB / 1.3s），
+        # .cc 只剩 472B 空壳，.sbs/.club/.net/.org 全部 TLS/CONNECT 失败。
+        cands.extend(["https://madouqu.com", "https://madouqu.sbs",
+                      "https://madouqu.club", "https://madouqu.cc",
+                      "https://madouqu.net", "https://madouqu.org"])
     # 导航页里如果出现麻豆条目，也算候选
     try:
         from . import nav as navmod

@@ -344,6 +344,50 @@ def resolve_meta(url: str, proxy: str | None = None) -> dict:
     return data
 
 
+def resolve_direct(url: str, proxy: str | None = None) -> str:
+    """解析单个视频页，只返回**能直接播放**的直链（预览面板「在线播放」用）。
+
+    选择顺序：
+      1. yt-dlp 顶层 ``url``（多数站点给的就是 m3u8，体积小、起播快）；
+      2. ``formats`` 里分辨率最高的 http 直链；
+      3. 站点包 / resolve_meta 给出的 direct_url(s)。
+    返回空串表示解析不出（调用方负责提示），不抛异常。
+    """
+    if not url:
+        return ""
+    # ① 先走 yt-dlp：能拿到就直接用
+    try:
+        info = ytdlp().service.probe(url, proxy=proxy)
+        raw = getattr(info, "raw", None) or {}
+        top = raw.get("url")
+        if isinstance(top, str) and top.startswith("http"):
+            return top
+        best, best_h = "", -1
+        for f in (raw.get("formats") or []):
+            u = f.get("url")
+            if not isinstance(u, str) or not u.startswith("http"):
+                continue
+            h = f.get("height") or 0
+            if h > best_h:
+                best, best_h = u, h
+        if best:
+            return best
+    except Exception:  # noqa: BLE001
+        pass
+    # ② 退回站点包解析
+    try:
+        data = resolve_meta(url, proxy=proxy)
+        for key in ("direct_urls", "direct_url"):
+            v = data.get(key)
+            if isinstance(v, list) and v:
+                return str(v[0])
+            if isinstance(v, str) and v.startswith("http"):
+                return v
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 # ------------------------------------------------------------------ 麻豆
 def madouqu() -> SimpleNamespace:
     """麻豆（磁力爬虫）：独立模块，自带 JSON 库。"""

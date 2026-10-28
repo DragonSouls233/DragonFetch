@@ -280,6 +280,15 @@ QLabel#Warn { color: $warn; font-size: 12px; }
 QLabel#Ok { color: $ok; font-size: 12px; }
 QLabel#Err { color: $err; font-size: 12px; }
 
+/* ---------------- 主内容 / 预览分栏 ---------------- */
+QSplitter#MainSplit::handle:horizontal {
+    background: $border_soft;
+    width: 4px;
+    margin: 14px 4px;
+    border-radius: 2px;
+}
+QSplitter#MainSplit::handle:horizontal:hover { background: $accent; }
+
 /* ---------------- 内置预览面板 ---------------- */
 QFrame#PreviewPane {
     background: $surface2;

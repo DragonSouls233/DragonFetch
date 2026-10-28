@@ -95,6 +95,16 @@ class JiusePage(Page):
     title = "九色 · 91PORNY"
     subtitle = "地址页 dizhi222.pages.dev 直连取最新线路（不走代理）→ 打开站点 / 抓列表 / 下载"
 
+    # ---------------------------------------------------------------- 内置浏览器
+    def home_url(self) -> str:
+        """当前线路的主页：九色经常换域名，取「地址同步」校验过的那一个。"""
+        st = settings()
+        return ((st.get("jiuse.active_url", "") or "").strip()
+                or "https://91porny.com/")
+
+    def browse_download_dir(self) -> str:
+        return settings().get("jiuse.download_dir", "") or ""
+
     def build(self) -> None:
         self._ns = None
         self._items: list[dict] = []
@@ -543,6 +553,10 @@ class JiusePage(Page):
             # 九色解析只要 2 秒（一次 GET + 正则），放心在选中时就预解析
             prefetch=bool(url),
         )
+        # 只在「预览」标签上打个圆点，不把正在浏览的网页切走
+        ws = getattr(self, "workspace", None)
+        if ws is not None and hasattr(ws, "mark_preview"):
+            ws.mark_preview()
 
     def _toggle_all(self, state: int) -> None:
         on = bool(state)

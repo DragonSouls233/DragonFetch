@@ -30,6 +30,14 @@ class NavPage(Page):
     title = "导航页 · 黄视频"
     subtitle = "daohang.pro 的链接表需要代理读取；解析出的站点默认直连使用"
 
+    # ---------------------------------------------------------------- 内置浏览器
+    def home_url(self) -> str:
+        """导航页模块没有固定站点，浏览区留空给用户自己输网址。"""
+        return ""
+
+    def browse_download_dir(self) -> str:
+        return settings().get("yttiktok.download_dir", "") or ""
+
     def build(self) -> None:
         # ---------------- 顶部：刷新 + 状态
         top = Card()
@@ -56,7 +64,11 @@ class NavPage(Page):
         self.chk_proxy.setChecked(bool(settings().get("proxy.enabled", True)))
         row2.addWidget(self.chk_proxy)
         tl.addLayout(row2)
-        self.body.addWidget(top)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(10)
+        lv.addWidget(top)
 
         # ---------------- 入口表
         table_card = Card()
@@ -82,7 +94,7 @@ class NavPage(Page):
         self.table = make_table(["名称", "说明", "地址", "线路"], [150, 240, 300, 200])
         self.table.doubleClicked.connect(lambda _i: self._open_selected())
         cl.addWidget(self.table, 1)
-        self.body.addWidget(table_card, 2)
+        lv.addWidget(table_card, 2)
 
         # ---------------- 黄视频
         hv = Card()
@@ -131,7 +143,13 @@ class NavPage(Page):
         self.lbl_hv_status = QLabel("空闲")
         self.lbl_hv_status.setObjectName("Muted")
         hl.addWidget(self.lbl_hv_status)
-        self.body.addWidget(hv)
+        lv.addWidget(hv)
+
+        # 右侧：导航页里的入口点开就能在应用内逛，不用跳系统浏览器
+        from ..preview import PreviewPane
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.attach_preview(left, self.preview)
 
         self._entries = []
         self._fill(nav.cached_entries(), nav.cached_payload())
@@ -200,10 +218,24 @@ class NavPage(Page):
             return None
         return self._entries[row]
 
+    def open_in_browser(self, url: str) -> None:
+        """在右侧「浏览」标签里打开；没有 WebEngine 才退回系统浏览器。"""
+        url = (url or "").strip()
+        if not url:
+            return
+        ws = getattr(self, "workspace", None)
+        bp = getattr(self, "browser_panel", None)
+        if bp is not None and bp.available:
+            if ws is not None:
+                ws.setCurrentIndex(0)
+            bp.load(url)
+            return
+        QDesktopServices.openUrl(QUrl(url))
+
     def _open_selected(self) -> None:
         e = self._selected_entry()
         if e:
-            QDesktopServices.openUrl(QUrl(e.get("url") or e.get("base_url")))
+            self.open_in_browser(e.get("url") or e.get("base_url") or "")
 
     def _apply_route(self) -> None:
         e = self._selected_entry()
@@ -225,7 +257,7 @@ class NavPage(Page):
     def _open_huangvideo(self) -> None:
         hv = [e for e in self._entries if e.get("kind") == "huangvideo"]
         url = (hv[0].get("url") if hv else "") or "https://huang.video/"
-        QDesktopServices.openUrl(QUrl(url))
+        self.open_in_browser(url)
 
     def _pick_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "选择下载目录",

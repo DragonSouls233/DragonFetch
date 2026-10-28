@@ -216,6 +216,40 @@ QTabBar::tab {
 QTabBar::tab:selected { color: $text; border-bottom: 2px solid $accent; }
 QTabBar::tab:hover { color: $text; }
 
+/* ---------------- 内置浏览器 ---------------- */
+QWidget#BrowserBar {
+    background: $surface2;
+    border-bottom: 1px solid $border_soft;
+}
+QPushButton#BrowserTool {
+    background: transparent; border: 1px solid transparent;
+    border-radius: 8px; color: $sub; font-size: 13px; padding: 0;
+}
+QPushButton#BrowserTool:hover {
+    background: $surface3; color: $text; border-color: $border;
+}
+QPushButton#BrowserTool:disabled { color: $muted; background: transparent; }
+QLineEdit#BrowserAddr {
+    background: $bg; border: 1px solid $border; border-radius: 8px;
+    padding: 5px 9px; font-size: 12px; color: $sub;
+}
+QLineEdit#BrowserAddr:focus { border-color: $accent; color: $text; }
+QFrame#SniffBar {
+    background: $accent_soft;
+    border-top: 1px solid $border_soft;
+}
+/* 工作区（浏览/预览）与内层浏览器标签：去掉双层圆角，网页贴边才好看 */
+QTabWidget#Workspace::pane {
+    border: 1px solid $border_soft; border-radius: 12px;
+    background: $surface; top: -1px;
+}
+QTabWidget#BrowserTabs::pane {
+    border: none; border-radius: 0; background: $bg; top: 0;
+}
+QTabWidget#BrowserTabs QTabBar::tab {
+    padding: 6px 13px; font-size: 12px; max-width: 190px;
+}
+
 /* ---------------- 滚动条 ---------------- */
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
 QScrollBar::handle:vertical {

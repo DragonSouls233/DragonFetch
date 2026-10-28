@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 from ..core import backend, navsync, paths
 from ..core.version import APP_VERSION
 from ..core.logbus import LOG
-from ..core.settings import settings
+from ..core.settings import WINDOW_DEFAULT_H, WINDOW_DEFAULT_W, settings
 from ..core.tasks import CENTER, Task
 from . import theme
 from .widgets import Toast
@@ -29,6 +29,7 @@ BASE_NAV = [
     ("home", "◎", "总览", "工作台"),
     ("tangxin", "◈", "糖心 Vlog", "媒体库"),
     ("huangguo", "◇", "黄果短剧", "媒体库"),
+    ("duanju", "◐", "短剧平台", "媒体库"),
     ("jiuse", "◉", "九色视频", "媒体库"),
     ("madouqu", "◍", "麻豆磁力", "下载器"),
     ("yttiktok", "▶", "映取 · YT/TikTok", "下载器"),
@@ -75,6 +76,7 @@ def _factory(key: str) -> Callable[[], QWidget]:
         from .pages.home import HomePage
         from .pages.tangxin import TangxinPage
         from .pages.huangguo import HuangguoPage
+        from .pages.duanju import DuanjuPage
         from .pages.jiuse import JiusePage
         from .pages.madouqu import MadouquPage
         from .pages.yttiktok import YtTiktokPage
@@ -84,6 +86,7 @@ def _factory(key: str) -> Callable[[], QWidget]:
         from .pages.settings_page import SettingsPage
         _FACTORIES.update({
             "home": HomePage, "tangxin": TangxinPage, "huangguo": HuangguoPage,
+            "duanju": DuanjuPage,
             "jiuse": JiusePage, "madouqu": MadouquPage,
             "yttiktok": YtTiktokPage, "nav": NavPage, "navsync": NavSyncPage,
             "library": LibraryPage, "settings": SettingsPage,
@@ -234,14 +237,54 @@ class LogDialog(QWidget):
         super().closeEvent(event)
 
 
+def _startup_geometry(s) -> tuple:
+    """算出启动窗口的 (宽, 高, x, y)。
+
+    基准是 1080P（1920×1080），但不能硬塞：笔记本 1366×768、或者 2K 屏开了
+    150% 缩放（可用逻辑像素只有 1707×960）都装不下 1920×1080，硬 resize 会让
+    窗口顶出屏幕，右侧内置浏览器和底部状态栏直接点不到。所以统一按屏幕的
+    ``availableGeometry``（已排除任务栏）收边，再居中摆。
+
+    返回的 x/y 为 None 表示没有屏幕信息，交给 Qt 自己放。
+    """
+    try:
+        w = int(s.get("window.width", WINDOW_DEFAULT_W) or WINDOW_DEFAULT_W)
+        h = int(s.get("window.height", WINDOW_DEFAULT_H) or WINDOW_DEFAULT_H)
+    except Exception:  # noqa: BLE001 - 配置被手改成字符串也不能挡住开界面
+        w, h = WINDOW_DEFAULT_W, WINDOW_DEFAULT_H
+    # 保底：存盘尺寸不足基准的 80%（<1536×864）时按 1080P 重来。
+    # 两个来源都会把尺寸带偏：一是老配置里存着 1440×900 时代的尺寸，只改
+    # DEFAULTS 对已存盘的键无效；二是测试/截图脚本构造完主窗口会顺手把
+    # resize 过的尺寸写回真实配置（已实测踩到，1440/1500 反复冒出来）。
+    # 用户在 80% 以上范围内自己调，仍然照旧记住。
+    if w < WINDOW_DEFAULT_W * 0.8 or h < WINDOW_DEFAULT_H * 0.8:
+        w, h = WINDOW_DEFAULT_W, WINDOW_DEFAULT_H
+    scr = QApplication.primaryScreen()
+    if scr is None:
+        return w, h, None, None
+    avail = scr.availableGeometry()
+    # 高度再留 40px 给标题栏和边缘，宽度留 16px 防贴边
+    max_w = max(640, avail.width() - 16)
+    max_h = max(480, avail.height() - 40)
+    w, h = min(w, max_w), min(h, max_h)
+    x = avail.x() + (avail.width() - w) // 2
+    y = avail.y() + (avail.height() - h) // 2
+    return w, h, x, y
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName("Root")
         self.setWindowTitle(f"DragonFetch · 统一下载工作台  v{APP_VERSION}")
-        self.setMinimumSize(1180, 760)
         s = settings()
-        self.resize(int(s.get("window.width", 1440)), int(s.get("window.height", 900)))
+        w, h, x, y = _startup_geometry(s)
+        # 最小尺寸跟着屏幕走：屏幕比 1180×760 还小的时候不能再拿它当地板，
+        # 否则窗口的下半截永远在屏幕外。
+        self.setMinimumSize(min(1180, w), min(760, h))
+        self.resize(w, h)
+        if x is not None:
+            self.move(x, y)
 
         central = QWidget()
         central.setObjectName("Root")
@@ -293,6 +336,15 @@ class MainWindow(QMainWindow):
                 page.on_show()
             except Exception as exc:  # noqa: BLE001
                 LOG.error(f"页面 {key} 刷新失败：{exc}")
+        # 内置浏览器懒加载：只有真正切到这一页才创建 WebEngineView。
+        # 20 多个页面各开一个 Chromium 渲染进程会吃掉几 GB 内存，所以宁可
+        # 每次进来晚 0.3 秒，也不在启动时全建出来。
+        bp = getattr(page, "browser_panel", None)
+        if bp is not None:
+            try:
+                bp.ensure_loaded()
+            except Exception as exc:  # noqa: BLE001
+                LOG.error(f"页面 {key} 内置浏览器启动失败：{exc}")
         settings().set("window.last_page", key)
         settings().save()
 

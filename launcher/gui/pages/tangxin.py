@@ -260,6 +260,13 @@ class TangxinPage(Page):
         self.lbl_actor.setObjectName("Muted")
         rh.addWidget(t2)
         rh.addWidget(self.lbl_actor, 1)
+        self.btn_scan = QPushButton("扫描目录")
+        self.btn_scan.setObjectName("Ghost")
+        self.btn_scan.setToolTip(
+            "重扫已知目录（本机下载目录 + 配置的 NAS/外盘），\n"
+            "识别哪些作品已经下载、哪些别处已有")
+        self.btn_scan.clicked.connect(self.scan_dirs)
+        rh.addWidget(self.btn_scan)
         self.chk_hide_done = QCheckBox("隐藏已下载")
         self.chk_hide_done.stateChanged.connect(self._apply_video_filter)
         rh.addWidget(self.chk_hide_done)
@@ -621,6 +628,79 @@ class TangxinPage(Page):
             done = item is not None and item.data(Qt.ItemDataRole.UserRole) == "done"
             self.table_videos.setRowHidden(r, bool(hide and done))
 
+    # ------------------------------------------------------------ 扫描目录
+    def scan_dirs(self) -> None:
+        """重扫已知目录：本机下载目录 + 设置里配置的 NAS/外盘目录。
+
+        为什么要能手动触发：索引虽然会懒加载，但用户刚拷进一批成品、或刚挂上
+        NAS 时，界面上的「本地状态」还是旧的。这里做一次明确的全盘重扫，
+        结果同时写库（下载记录）和本页状态列。
+        """
+        if not self._ensure_backend():
+            return
+        self.btn_scan.setEnabled(False)
+        self.lbl_q.setText("扫描已知目录…")
+        ns = backend.tangxin()
+
+        def _run(progress=None):
+            idx = ns.existing.get_index()
+            dirs = list(getattr(idx, "known_dirs", []) or [])
+            if progress:
+                progress(0, max(1, len(dirs)),
+                         "开始扫描：" + ("、".join(dirs) if dirs else "（未配置目录）"))
+            return idx.refresh(on_progress=progress)
+
+        task = Task(_run, want_progress=True)
+        task.progress.connect(lambda p, t: self.lbl_q.setText((t or "扫描中…")[:120]))
+        task.done.connect(self._scan_done)
+        task.failed.connect(self._scan_failed)
+        CENTER.start(task)
+
+    def _scan_done(self, n) -> None:
+        self.btn_scan.setEnabled(True)
+        self.lbl_q.setText(f"扫描完成：索引 {int(n or 0)} 个文件")
+        self.notify(f"扫描完成：本地已有 {int(n or 0)} 个文件", "ok")
+        self._refresh_local_status()
+
+    def _scan_failed(self, tb: str) -> None:
+        self.btn_scan.setEnabled(True)
+        self.lbl_q.setText("扫描失败")
+        text = (tb or "").strip()
+        self.notify(text.splitlines()[-1][:160] if text else "扫描失败", "err")
+
+    def _refresh_local_status(self) -> None:
+        """只重算「本地状态」列（不重新抓网络列表）。"""
+        if not self._videos:
+            return
+        videos = list(self._videos)
+        ns = backend.tangxin()
+        out_base = settings().get("tangxin.output_base", "")
+
+        def _run(progress=None):
+            try:
+                return ns.existing.get_index().status_map(videos, out_base)
+            except Exception:                       # noqa: BLE001
+                return {}
+
+        task = Task(_run)
+        task.done.connect(self._apply_status_map)
+        CENTER.start(task)
+
+    def _apply_status_map(self, status) -> None:
+        status = status or {}
+        self.table_videos.blockSignals(True)
+        for r, v in enumerate(self._videos):
+            item = self.table_videos.item(r, 3)
+            if item is None:
+                continue
+            st, _p = status.get(str(v.vid), ("none", None))
+            item.setText({"downloaded": "已下载",
+                          "elsewhere": "别处已有"}.get(st, "未下载"))
+            item.setData(Qt.ItemDataRole.UserRole, "done" if st != "none" else "")
+        self.table_videos.blockSignals(False)
+        self._apply_video_filter()
+        self._update_pick()
+
     def _visible_rows(self):
         for r in range(self.table_videos.rowCount()):
             if not self.table_videos.isRowHidden(r):
@@ -759,6 +839,9 @@ class TangxinPage(Page):
         self._paused_event.clear()
         if self.tabs.currentIndex() == 1:
             self.reload_records()
+        # 下完立刻重算「本地状态」：否则刚下好的作品还显示"未下载"，
+        # 用户以为没下成、又点一遍（existing.record_downloaded 已经写库了，这里只是刷新界面）
+        self._refresh_local_status()
 
     def toggle_pause(self) -> None:
         if self._worker is None:

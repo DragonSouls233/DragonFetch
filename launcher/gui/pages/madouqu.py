@@ -53,6 +53,14 @@ class MadouquPage(Page):
     subtitle = "独立模块：按女郎/关键词抓 madouqu 的 BT 磁力（换域名点「从发布页更新」）"
 
     # ---------------------------------------------------------------- 构建
+    # ---------------------------------------------------------------- 内置浏览器
+    def home_url(self) -> str:
+        return (settings().get("madouqu.base_url", "") or "").strip() \
+            or "https://madouqu.com"
+
+    def browse_download_dir(self) -> str:
+        return settings().get("madouqu.download_dir", "") or ""
+
     def build(self) -> None:
         self._videos: list = []
         self._loading = False
@@ -62,11 +70,22 @@ class MadouquPage(Page):
         btn_refresh.clicked.connect(self.refresh_stats)
         self.header.add_action(btn_refresh)
 
-        self.body.addWidget(self._card_toolbar(), 0)
-        self.body.addWidget(self._build_table(), 1)
-        self.body.addWidget(self._build_actions(), 0)
-        self.body.addWidget(self._build_log(), 0)
-        self.body.addWidget(self._build_stats(), 0)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(10)
+        lv.addWidget(self._card_toolbar(), 0)
+        lv.addWidget(self._build_table(), 1)
+        lv.addWidget(self._build_actions(), 0)
+        lv.addWidget(self._build_log(), 0)
+        lv.addWidget(self._build_stats(), 0)
+
+        # 右侧：浏览器可直接逛 madouqu.shop（登录、看详情页、点磁力），
+        # 「预览」标签用来放封面/播放，两个用途各占一块空间。
+        from ..preview import PreviewPane
+        self.preview = PreviewPane()
+        self.preview.setMinimumHeight(320)
+        self.attach_preview(left, self.preview)
 
     def _card_toolbar(self) -> QWidget:
         card = Card()
@@ -76,8 +95,8 @@ class MadouquPage(Page):
 
         row1 = QHBoxLayout()
         row1.setSpacing(8)
-        self.ed_base = QLineEdit(str(settings().get("madouqu.base_url", "https://madouqu.sbs")))
-        self.ed_base.setPlaceholderText("站点域名，例如 https://madouqu.sbs")
+        self.ed_base = QLineEdit(str(settings().get("madouqu.base_url", "https://madouqu.shop")))
+        self.ed_base.setPlaceholderText("站点域名，例如 https://madouqu.shop")
         self.btn_test = QPushButton("检测域名")
         self.btn_test.setObjectName("Ghost")
         self.btn_test.clicked.connect(self.test_domain)
@@ -496,9 +515,26 @@ class MadouquPage(Page):
         picked = sum(1 for r in range(total) if self._row_checked(r))
         self.lbl_count.setText(f"共 {total} 条 · 已选 {picked} 条")
 
+    def open_in_browser(self, url: str, new_tab: bool = False) -> None:
+        """在右侧「浏览」标签里打开（磁力站也要能直接翻详情页）。"""
+        url = (url or "").strip()
+        if not url:
+            return
+        ws = getattr(self, "workspace", None)
+        bp = getattr(self, "browser_panel", None)
+        if bp is not None and bp.available:
+            if ws is not None:
+                ws.setCurrentIndex(0)
+            if new_tab:
+                bp.add_tab(url)
+            else:
+                bp.load(url)
+            return
+        QDesktopServices.openUrl(QUrl(url))
+
     def _row_double_clicked(self, item: QTableWidgetItem) -> None:
         if item.column() == 5 and item.text().strip():
-            QDesktopServices.openUrl(QUrl(item.text().strip()))
+            self.open_in_browser(item.text().strip())
 
     def _magnets_of(self, row: int) -> list:
         if not (0 <= row < len(self._videos)):
@@ -561,10 +597,10 @@ class MadouquPage(Page):
             self.notify("请先选中结果", "warn")
             return
         n = 0
-        for r in rows[:10]:
+        for i, r in enumerate(rows[:6]):
             url = getattr(self._videos[r], "detail_url", "") or ""
             if url:
-                QDesktopServices.openUrl(QUrl(url))
+                self.open_in_browser(url, new_tab=(i > 0))
                 n += 1
         self.log.append("info" if n else "warn",
                         f"已打开 {n} 个详情页" if n else "所选条目没有详情页地址")

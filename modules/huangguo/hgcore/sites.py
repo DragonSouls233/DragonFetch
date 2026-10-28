@@ -161,9 +161,167 @@ SITE_HUANGGUOAC = {
     "note": "黄果漫剧站（漫剧/日漫/韩漫，免费 m3u8 可直接下载）",
 }
 
-# 候选站点顺序即默认优先级（前者优先）
-SITES: List[Dict] = [SITE_HUANGUOAI, SITE_HUANGUOME, SITE_HUANGGUOAC]
+SITE_AIHUANGDOU = {
+    "id": "aihuangdou",
+    "name": "黄桃短剧",
+    "domain": "aihuangdou.com",
+    "base_url": "https://aihuangdou.com",
+    # 根域即列表首页；/go-home/ 是「回家的路」发布页（title 明确写「官方最新地址
+    # 发布页_回家的路」），只用于读最新域名，不能当 base_url。
+    "home_url": "https://aihuangdou.com/",
+    "candidates": [
+        "https://aihuangdou.com/",
+    ],
+    "publish_pages": [
+        "https://aihuangdou.com/go-home/",
+    ],
+    # 2026-10-28 实测：与黄果树（hg-drama-card）**不是同一套前端**，
+    # 卡片是 article.drama-card + .poster-orbit + .poster-img + .card-score +
+    # .eps-flag。所以不能复用 parser_home，必须走 backend_huangdou 自己的解析器。
+    "markers": ["poster-orbit", "drama-card"],
+    "strong_markers": ["poster-orbit"],
+    # 注意 required 里不能写 "drama-card"：黄果树的是 "hg-drama-card"，
+    # 子串匹配会把两站混在一起（已踩）。poster-orbit 是本站独有 class。
+    "required": ["poster-orbit", "aihuangdou"],
+    # 分类取自站点主导航真实文案：首页 / AI短剧 / AI漫剧 / 成人小说 / 短剧社区 /
+    # 排行榜 / 热门标签。小说与社区不是视频，不收；标签页当「专题」用。
+    "categories": [
+        ("AI短剧", "/ai-duanju/"),
+        ("AI漫剧", "/ai-manju/"),
+        ("排行榜", "/rankings/"),
+        ("热门标签", "/tags/"),
+    ],
+    # 分页：/ai-duanju/{page}/（页面带 data-pages=28，实测第 2 页 24 张卡片）
+    "pager": {"style": "path", "segment": "", "total_attr": "data-pages"},
+    # 站点路径与黄果不同，URL 模板随站点走（config._rebuild_urls 会读这里）。
+    # 第 1 集无后缀：/video/{did}/ ，其余 /video/{did}/{ep}/
+    "urls": {
+        "detail": "/drama/{did}/",
+        "play": "/video/{did}/",
+        "play_ep": "/video/{did}/{ep}/",
+        "search": "/search/?q={kw}",
+        "topic": "/tags/{slug}/",
+    },
+    "download_subdir": "aihuangdou",
+    "cover_encrypted": True,
+    "cover_crypt": "aes",           # 实测与 huangguoai 同一套 AES-128-CBC key/iv
+    "backend": "backend_huangdou",
+    "color": "#f2994a",
+    "note": "黄桃短剧（AI短剧/漫剧，免费 m3u8，与黄果有重合内容）",
+}
 
+SITE_CRDJ = {
+    "id": "crdj",
+    "name": "91成人短剧",
+    "domain": "91crdjai.com",
+    "base_url": "https://91crdjai.com",
+    # 列表首页是 /duanju/（首页 / 是导航聚合页，卡片结构一样）
+    "home_url": "https://91crdjai.com/duanju/",
+    "candidates": [
+        "https://91crdjai.com/duanju/",
+    ],
+    # /dizhi/ 是「官方地址」发布页（title：91成人短剧官网 - 最新地址、永久入口与备用线路）
+    "publish_pages": [
+        "https://91crdjai.com/dizhi/",
+    ],
+    # 第四套前端：a.card + img.p-img + .eps-flag + .score
+    "markers": ["p-img", "eps-flag", "card-info"],
+    "strong_markers": ["p-img"],
+    "required": ["p-img", "91crdjai"],
+    "categories": [
+        ("成人短剧", "/duanju/"),
+        ("成人漫剧", "/manju/"),
+        ("真人剧", "/zhenrenju/"),
+        ("热播榜", "/paihang/"),
+        ("标签榜", "/biaoqian/"),
+    ],
+    # 分页是 /duanju/page/{n}/ —— 注意不是 /duanju/{n}/（后者是「剧 id=n」的详情）
+    "pager": {"style": "path", "segment": "page", "total_attr": "pg-input-max"},
+    "urls": {
+        "detail": "/duanju/{did}/",
+        "play": "/duanju/{did}/{ep}/",
+        "play_ep": "/duanju/{did}/{ep}/",
+        "search": "/search/?q={kw}",
+        "topic": "/biaoqian/{slug}/",
+    },
+    "download_subdir": "crdj",
+    "cover_encrypted": True,
+    "cover_crypt": "aes",           # 与黄桃同 CDN（pic.drleao.cn），同一套 AES key
+    "backend": "backend_crdj",
+    "color": "#eb5757",
+    "note": "91成人短剧（与黄桃同后端 API，取址走 /videos/{id}/episodes/{ep}/playback）",
+}
+
+SITE_YOUZIDJ = {
+    "id": "youzidj",
+    "name": "柚子短剧",
+    "domain": "youzidj.com",
+    "base_url": "https://youzidj.com",
+    "home_url": "https://youzidj.com/",
+    "candidates": ["https://youzidj.com/"],
+    # 回家路导航页（title：柚子短剧 · 官方最新地址）
+    "publish_pages": ["https://yzdju.online/"],
+    "markers": ["home-drama-card", "drama-poster-image"],
+    "strong_markers": ["home-drama-card"],
+    "required": ["home-drama-card"],
+    "categories": [],
+    "pager": {"style": "path", "segment": "page"},
+    "urls": {
+        "detail": "/drama/{did}/",
+        "play": "/video/{did}/{ep}/",
+        "play_ep": "/video/{did}/{ep}/",
+        "search": "/search/?q={kw}",
+    },
+    "download_subdir": "youzidj",
+    "cover_encrypted": False,
+    "cover_crypt": "",
+    "backend": "backend_youzidj",
+    "color": "#f2c94c",
+    # 暂未接入：列表模板已认出来（home-drama-card），但详情/播放页结构还没拆完，
+    # 打开这个开关前必须先补齐 parser_youzidj + backend_youzidj。
+    "enabled": False,
+    "note": "柚子短剧（模板已识别，解析器待补，暂不参与扫描）",
+}
+
+SITE_AIWU = {
+    "id": "aiwu",
+    "name": "AI污短剧",
+    "domain": "ai-wu.cc",
+    "base_url": "https://aiwu.ai-wu.cc",
+    "home_url": "https://aiwu.ai-wu.cc/browse/",
+    "candidates": ["https://aiwu.ai-wu.cc/browse/"],
+    # 导航页（xn--ai-iw1e 是 punycode 的「ai.污」）
+    "publish_pages": ["https://xn--ai-iw1e.ai-wutv.xyz/aiwu/"],
+    "markers": ["nf-card", "nf-poster"],
+    "strong_markers": ["nf-card"],
+    "required": ["nf-card"],
+    "categories": [
+        ("AI成人短剧", "/aidj/crdj/"),
+        ("AI成人漫剧", "/aidj/crmj/"),
+        ("AI换脸", "/aidj/aihl/"),
+        ("AI魔改", "/aidj/aimg/"),
+    ],
+    "pager": {"style": "path", "segment": "page"},
+    "urls": {
+        "detail": "/detail/{did}/",
+        "play": "/play/{did}-1-{ep}/",
+        "play_ep": "/play/{did}-1-{ep}/",
+        "search": "/search/?q={kw}",
+    },
+    "download_subdir": "aiwu",
+    "cover_encrypted": False,
+    "cover_crypt": "",
+    "backend": "backend_aiwu",
+    "color": "#6fcf97",
+    # 暂未接入：列表/详情能解析，但**播放地址是 JS 动态下发**（播放页里既没有
+    # m3u8 也没有 mp4，实测），要拿到直链必须逆向前端 JS，属于独立工作量。
+    "enabled": False,
+    "note": "AI污短剧（列表/详情可解析，播放直链需逆向，暂不参与扫描）",
+}
+
+# 候选站点顺序即默认优先级（前者优先）
+SITES: List[Dict] = [SITE_HUANGUOAI, SITE_HUANGUOME, SITE_HUANGGUOAC,
+                     SITE_AIHUANGDOU, SITE_CRDJ, SITE_YOUZIDJ, SITE_AIWU]
 # id -> site 定义
 _BY_ID: Dict[str, Dict] = {s["id"]: s for s in SITES}
 

@@ -129,6 +129,14 @@ class SitePage(Page):
                          + (f" · {self.site.note}" if self.site.note else ""))
         super().__init__()
 
+    # ---------------------------------------------------------------- 内置浏览器
+    def home_url(self) -> str:
+        """本站首页：切进这一页就能直接浏览/登录/点播，不用先解析。"""
+        return getattr(self.site, "homepage", "") or f"https://{self.site.domain}"
+
+    def browse_download_dir(self) -> str:
+        return str(self.site.download_dir)
+
     # ---------------------------------------------------------------- 构建
     def build(self) -> None:
         self._items: list[dict] = []
@@ -322,8 +330,32 @@ class SitePage(Page):
 
     # ---------------------------------------------------------------- 站点
     def open_site(self) -> None:
-        QDesktopServices.openUrl(QUrl(self.site.homepage))
-        self.log.append("ok", f"已打开 {self.site.homepage}")
+        """在**应用内**打开本站（不再甩给系统浏览器）。
+
+        系统浏览器一开，站点的登录态、代理、下载拦截全都不归程序管了；
+        内嵌浏览才能把这些串起来（cookie 落 DATA/app/webengine）。
+        """
+        url = self.site.homepage
+        self.open_in_browser(url)
+        self.log.append("ok", f"已在内置浏览器打开 {url}")
+
+    # ---------------------------------------------------------------- 内置浏览器
+    def open_in_browser(self, url: str, new_tab: bool = False) -> None:
+        """统一的"在右侧浏览区打开"入口；没有 WebEngine 时退回系统浏览器。"""
+        url = (url or "").strip()
+        if not url:
+            return
+        ws = getattr(self, "workspace", None)
+        bp = getattr(self, "browser_panel", None)
+        if bp is not None and bp.available:
+            if ws is not None:
+                ws.setCurrentIndex(0)      # 切到「浏览」标签
+            if new_tab:
+                bp.add_tab(url)
+            else:
+                bp.load(url)
+            return
+        QDesktopServices.openUrl(QUrl(url))
 
     # ---------------------------------------------------------------- 解析
     def resolve_direct(self) -> None:
@@ -571,7 +603,7 @@ class SitePage(Page):
 
     def _row_double_clicked(self, item: QTableWidgetItem) -> None:
         if item.column() == 7 and item.text().strip():
-            QDesktopServices.openUrl(QUrl(item.text().strip()))
+            self.open_in_browser(item.text().strip())
 
     def _preview_selected(self) -> None:
         row = self.table.currentRow()
@@ -590,6 +622,9 @@ class SitePage(Page):
             video=direct or None,
             resolver=resolver,
         )
+        ws = getattr(self, "workspace", None)
+        if ws is not None and hasattr(ws, "mark_preview"):
+            ws.mark_preview()
 
     def _row_checked(self, row: int) -> bool:
         it = self.table.item(row, 0)
@@ -670,9 +705,9 @@ class SitePage(Page):
         if not urls:
             self.notify("请先勾选结果", "warn")
             return
-        for u in urls[:10]:
-            QDesktopServices.openUrl(QUrl(u))
-        self.log.append("ok", f"已打开 {min(len(urls), 10)} 个页面")
+        for i, u in enumerate(urls[:6]):
+            self.open_in_browser(u, new_tab=(i > 0))
+        self.log.append("ok", f"已在内置浏览器打开 {min(len(urls), 6)} 个页面")
 
     # ---------------------------------------------------------------- 下载
     def _pick_out(self) -> None:

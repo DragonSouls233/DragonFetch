@@ -11,6 +11,7 @@ config.XXX 动态读取，因此切换站点后无需重新 import 即可生效�
 
 import os
 from pathlib import Path
+from typing import Optional
 
 # 镜像站点使用自签/不受信证书，访问时关闭了证书校验（verify=False）。
 # 屏蔽由此产生的 InsecureRequestWarning，避免日志被刷屏、误导用户以为报错。
@@ -83,12 +84,33 @@ get_site = _sites.get_site
 # 这些常量由 _rebuild_urls 依据 ACTIVE_SITE 重建
 BASE_URL = ACTIVE_SITE["base_url"]
 
+# 站点路径模板：黄果树是 /detail/{did}/、/video/{did}/ep-{ep}/；黄桃短剧是
+# /drama/{did}/、/video/{did}/{ep}/。站点可以用 "urls" 覆盖任意一项，
+# 没写的项回落到黄果默认值（保持老行为不变）。
+_DEFAULT_URLS = {
+    "detail": "/detail/{did}/",
+    "play": "/video/{did}/",
+    "play_ep": "/video/{did}/ep-{ep}/",
+    "search": "/search/video/{kw}/",
+    "topic": "/topics/{slug}/",
+}
+
+
+def url_tpl(site: Optional[dict], key: str) -> str:
+    """取某站点的路径模板（以 / 开头），缺失时回落黄果默认值。"""
+    default = _DEFAULT_URLS.get(key, "")
+    tpl = str(((site or {}).get("urls") or {}).get(key) or "").strip()
+    if not tpl:
+        return default
+    return tpl if tpl.startswith("/") else "/" + tpl
+
+
 URL_HOME = ACTIVE_SITE["home_url"]
-URL_DETAIL = BASE_URL + "/detail/{did}/"
-URL_PLAY = BASE_URL + "/video/{did}/"
-URL_PLAY_EP = BASE_URL + "/video/{did}/ep-{ep}/"   # 第 1 集无后缀
-URL_SEARCH = BASE_URL + "/search/video/{kw}/"
-URL_TOPIC = BASE_URL + "/topics/{slug}/"
+URL_DETAIL = BASE_URL + url_tpl(ACTIVE_SITE, "detail")
+URL_PLAY = BASE_URL + url_tpl(ACTIVE_SITE, "play")
+URL_PLAY_EP = BASE_URL + url_tpl(ACTIVE_SITE, "play_ep")
+URL_SEARCH = BASE_URL + url_tpl(ACTIVE_SITE, "search")
+URL_TOPIC = BASE_URL + url_tpl(ACTIVE_SITE, "topic")
 
 # 分类 TAB（顺序即界面显示顺序），由 _rebuild_urls 依据 ACTIVE_SITE 重建
 CATEGORIES = []   # 实际内容在 _rebuild_urls 中填充
@@ -177,11 +199,11 @@ def _rebuild_urls() -> None:
     # 保证 BASE_URL 是镜像时 URL_HOME 也是镜像。
     URL_HOME = base + "/"
     ACTIVE_SITE["home_url"] = URL_HOME
-    URL_DETAIL = base + "/detail/{did}/"
-    URL_PLAY = base + "/video/{did}/"
-    URL_PLAY_EP = base + "/video/{did}/ep-{ep}/"
-    URL_SEARCH = base + "/search/video/{kw}/"
-    URL_TOPIC = base + "/topics/{slug}/"
+    URL_DETAIL = base + url_tpl(ACTIVE_SITE, "detail")
+    URL_PLAY = base + url_tpl(ACTIVE_SITE, "play")
+    URL_PLAY_EP = base + url_tpl(ACTIVE_SITE, "play_ep")
+    URL_SEARCH = base + url_tpl(ACTIVE_SITE, "search")
+    URL_TOPIC = base + url_tpl(ACTIVE_SITE, "topic")
 
     DEFAULT_HEADERS["Referer"] = base + "/"
 
@@ -213,12 +235,28 @@ def set_active_site(site: dict) -> None:
 
     会就地修改模块级全局变量；已 import 进来的其他模块通过 config.XXX
     动态读取，因此都能立即生效。
+
+    同时把「选了哪个站 + 该站的地址」写回 .hg_config.json：base_url 是站点
+    私有的，跨站沿用会把域名串到别的站上去（见 apply_settings 的注释）。
     """
     global BASE_URL, ACTIVE_SITE_ID, ACTIVE_SITE
     ACTIVE_SITE = site
     ACTIVE_SITE_ID = site["id"]
     BASE_URL = site["base_url"].rstrip("/")
     _rebuild_urls()
+    _persist_site_choice(site)
+
+
+def _persist_site_choice(site: dict) -> None:
+    """把当前站点与其地址写进本地配置（失败不阻塞切换）。"""
+    try:
+        data = _settings.load()
+        data["site_id"] = site.get("id")
+        data["base_url"] = (site.get("base_url") or "").rstrip("/")
+        data["home_url"] = site.get("home_url") or (data.get("base_url") or "") + "/"
+        _settings.save(data)
+    except Exception:                  # noqa: BLE001 - 写盘失败不影响切站
+        pass
 
 
 def category_url(marker: str, default: str = "") -> str:
@@ -265,10 +303,17 @@ def apply_settings(s: dict) -> None:
     global AUTO_PICK_MIRROR, SITE_MIRRORS, AUTO_REFRESH_MIRROR
 
     # 若提供了 base_url / home_url，则视为覆盖「当前站点」的地址
-    if s.get("base_url"):
+    #
+    # ⚠ base_url / home_url 是**站点私有**的设置：配置文件里存的是上一次生效
+    # 站点（可能是黄果）的镜像域名。若不校验站点就沿用，切到黄桃/91短剧后
+    # BASE_URL 会被写成黄果的镜像域名，整站 404（实测踩到：切到黄桃后
+    # BASE_URL 变成 dx9d6.arj2ftl0.cc）。所以只有「配置里的站点 == 当前站点」
+    # 时才沿用；站点不同时忽略它，由 set_active_site 写本站的地址。
+    same_site = (not s.get("site_id")) or str(s.get("site_id")) == str(ACTIVE_SITE_ID)
+    if s.get("base_url") and same_site:
         BASE_URL = s.get("base_url").rstrip("/")
         ACTIVE_SITE["base_url"] = BASE_URL
-    if s.get("home_url"):
+    if s.get("home_url") and same_site:
         ACTIVE_SITE["home_url"] = s.get("home_url")
 
     PROXY_URL = (s.get("proxy_url") or os.environ.get("HG_PROXY", "")).strip()

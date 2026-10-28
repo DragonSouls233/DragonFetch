@@ -160,6 +160,14 @@ def huangguo() -> SimpleNamespace:
                 site_db=_imp("hgcore.site_db"),
                 site_discovery=_imp("hgcore.site_discovery"),
                 downloader=_imp("hgcore.downloader"),
+                # 短剧平台聚合层：多站统一入库 + 跨站去重（「只提取独有的」）
+                platform=_imp("hgcore.platform"),
+                # 下面三个以前没暴露，导致「列表缓存」「封面解密」在界面层完全用不到：
+                # hgcore/cache.py 被移植了却没有任何调用方，封面又是加密图，
+                # 直接 QPixmap(url) 只能拿到一堆解不开的字节（＝封面一个都不显示）。
+                cache=_imp("hgcore.cache"),
+                media_crypto=_imp("hgcore.media_crypto"),
+                http_client=_imp("hgcore.http_client"),
             )
     ns = _CACHE["huangguo"]
     apply_huangguo_settings(ns)
@@ -518,7 +526,8 @@ def madouqu_crawler(use_selenium: bool = False):
     ns = madouqu()
     s = settings()
     cfg = {
-        "base_url": (s.get("madouqu.base_url") or "").strip() or "https://madouqu.sbs",
+        "base_url": (s.get("madouqu.base_url") or "").strip()
+                    or "https://madouqu.shop",
         "use_selenium": bool(use_selenium),
         "timeout": int(s.get("madouqu.timeout") or 20),
         "max_retries": 2,

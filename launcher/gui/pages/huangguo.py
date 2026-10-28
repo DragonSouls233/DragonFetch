@@ -10,18 +10,26 @@ import os
 import time
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QSplitter,
-    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+    QSplitter, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ...core import backend, paths
 from ...core.settings import settings
 from ...core.tasks import CENTER, Task
+from .. import theme
+from ..cover_cache import CoverCache
 from ..widgets import Badge, Card, HLine, SearchInput, make_table, open_path
 from .base import Page
 from ..preview import PreviewPane
+
+
+def _ui_tokens() -> dict:
+    """当前主题的配色（页面里的卡片/角标要按主题走，不能写死深色）。"""
+    return theme.tokens(settings().get("theme", "dark") != "light")
 
 
 class _QueueBridge(QObject):
@@ -31,10 +39,301 @@ class _QueueBridge(QObject):
     log = pyqtSignal(str)
 
 
+class _DramaCard(QFrame):
+    """一张剧集卡片：封面 + 下载角标 + 标题 + 评分/集数。
+
+    为什么改成卡片而不是原来的纯文字表格：封面是短剧唯一可靠的辨识信息，
+    表格行里塞 16px 缩略图等于没有。角标直接把「已下 N/M」标在封面上，
+    一眼就能看出哪些下过、哪些没下。
+    """
+
+    clicked = pyqtSignal(dict)
+
+    def __init__(self, drama: dict, tokens: dict, cover: tuple[int, int], parent=None):
+        super().__init__(parent)
+        self.setObjectName("DramaCard")
+        self.drama = drama
+        self._t = tokens
+        self._w, self._h = cover
+        self._selected = False
+        self._done = 0
+        self._total = int(drama.get("episode_count") or 0)
+
+        self.setFixedWidth(self._w + 16)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._build()
+        self._apply_style()
+
+    # ------------------------------------------------------------------ 构建
+
+    def _build(self) -> None:
+        t = self._t
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        wrap = QFrame(self)
+        wrap.setFixedSize(self._w, self._h)
+        wrap.setStyleSheet("background: transparent;")
+
+        self.cover = QLabel(wrap)
+        self.cover.setGeometry(0, 0, self._w, self._h)
+        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover.setText("加载中")
+        self.cover.setStyleSheet(
+            f"background:{t['surface3']}; border-radius:6px;"
+            f" color:{t['muted']}; font-size:12px;")
+
+        # 下载角标叠在封面左上角（不是布局子控件，必须自己 move/adjustSize）
+        self.badge = QLabel(wrap)
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.badge.setVisible(False)
+
+        lay.addWidget(wrap)
+
+        text = (self.drama.get("title") or "").strip() or "（无标题）"
+        self.title = QLabel(text)
+        self.title.setWordWrap(True)
+        self.title.setFixedWidth(self._w)
+        self.title.setMaximumHeight(34)
+        self.title.setToolTip(text)
+        self.title.setStyleSheet(
+            f"color:{t['text']}; font-size:12px; background:transparent;")
+        lay.addWidget(self.title)
+
+        parts = []
+        if self.drama.get("score"):
+            parts.append(f"{self.drama['score']}分")
+        if self._total:
+            parts.append(f"{self._total}集")
+        self.meta = QLabel(" · ".join(parts))
+        self.meta.setStyleSheet(
+            f"color:{t['sub']}; font-size:11px; background:transparent;")
+        lay.addWidget(self.meta)
+
+    def _apply_style(self) -> None:
+        t = self._t
+        if self._selected:
+            border, bg = t["accent"], t["accent_soft"]
+        elif self._done > 0 and self._total > 0 and self._done >= self._total:
+            border, bg = t["ok"], t["ok_soft"]
+        elif self._done > 0:
+            border, bg = t["warn"], t["warn_soft"]
+        else:
+            border, bg = t["border"], t["surface2"]
+        self.setStyleSheet(
+            f"QFrame#DramaCard {{ background:{bg}; border:1px solid {border};"
+            f" border-radius:8px; }}"
+            f"QFrame#DramaCard:hover {{ border:1px solid {t['accent']}; }}")
+
+    # ------------------------------------------------------------------ 状态
+
+    def key(self) -> str:
+        return str(self.drama.get("did"))
+
+    def set_selected(self, value: bool) -> None:
+        if self._selected != value:
+            self._selected = value
+            self._apply_style()
+
+    def set_status(self, done: int, total: int | None = None) -> None:
+        """标注下载进度：0 → 无角标；部分 → 琥珀「已下 N/M」；齐 → 绿「✓ 已下载」。"""
+        self._done = int(done or 0)
+        if total is not None:
+            self._total = int(total or 0)
+        t = self._t
+        if self._done <= 0:
+            self.badge.hide()
+        elif self._total > 0 and self._done >= self._total:
+            self._badge("✓ 已下载", t["ok"])
+        else:
+            txt = f"已下 {self._done}/{self._total}" if self._total > 0 else f"已下 {self._done}"
+            self._badge(txt, t["warn"])
+        self._apply_style()
+
+    def _badge(self, text: str, color: str) -> None:
+        self.badge.setText(text)
+        self.badge.setStyleSheet(
+            f"QLabel {{ background:{color}; color:#fff; border-radius:9px;"
+            f" font-size:11px; font-weight:bold; padding:0 8px; border:none; }}")
+        self.badge.setMaximumWidth(self._w - 8)
+        self.badge.adjustSize()
+        self.badge.move(4, 4)
+        self.badge.show()
+        self.badge.raise_()
+
+    def set_cover(self, image) -> None:
+        """填充封面（主线程；image 是工作线程已缩放好的 QImage）。"""
+        if image is None:
+            self.cover.setText("无封面")
+            return
+        pm = image if isinstance(image, QPixmap) else QPixmap.fromImage(image)
+        if pm.isNull():
+            self.cover.setText("无封面")
+            return
+        self.cover.setPixmap(pm)
+        self.cover.setText("")
+        if self.badge.isVisible():
+            self.badge.raise_()
+
+    def mousePressEvent(self, event) -> None:      # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.drama)
+        super().mousePressEvent(event)
+
+
+class _DramaGrid(QScrollArea):
+    """封面网格：分块建卡（每轮 12 张）避免一次性建上百张卡把界面卡住。"""
+
+    selected = pyqtSignal(dict)
+    CHUNK = 12
+
+    def __init__(self, tokens: dict, cover: tuple[int, int], cache: CoverCache | None = None,
+                 parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._t = tokens
+        self._w, self._h = cover
+        self._cache = cache
+
+        self._holder = QWidget()
+        self._gl = QGridLayout(self._holder)
+        self._gl.setContentsMargins(10, 10, 10, 10)
+        self._gl.setSpacing(10)
+        self._gl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.setWidget(self._holder)
+
+        self._cards: dict[str, _DramaCard] = {}
+        self._all: list[dict] = []
+        self._visible: list[dict] = []
+        self._pending: list[dict] = []
+        self._token = 0
+        self._status: dict[str, int] = {}
+        self._current: dict | None = None
+
+    def set_cache(self, cache: CoverCache) -> None:
+        """封面缓存要等后端就绪（知道当前站点）才能建，所以允许后置。"""
+        self._cache = cache
+        for key, card in self._cards.items():
+            url = (card.drama.get("cover_url") or card.drama.get("cover") or "").strip()
+            if url:
+                cache.request(key, url, self._on_cover)
+
+    # ------------------------------------------------------------------ 数据
+
+    def set_items(self, dramas: list[dict], status: dict[str, int] | None = None) -> None:
+        self._all = list(dramas or [])
+        self._visible = list(self._all)
+        self._status = dict(status or {})
+        self._current = None
+        self._rebuild()
+
+    def set_filter(self, text: str) -> None:
+        kw = (text or "").strip().lower()
+        self._visible = [d for d in self._all
+                         if not kw or kw in str(d.get("title") or "").lower()]
+        visible_keys = {str(d.get("did")) for d in self._visible}
+        for key, card in self._cards.items():
+            card.setVisible(key in visible_keys)
+        self._relayout()
+
+    def refresh_status(self, status: dict[str, int]) -> None:
+        self._status = dict(status or {})
+        for key, card in self._cards.items():
+            card.set_status(self._status.get(key, 0), card.drama.get("episode_count"))
+
+    def select_first(self) -> None:
+        if self._visible:
+            self._select(self._visible[0])
+
+    def current(self) -> dict | None:
+        return self._current
+
+    def count(self) -> int:
+        return len(self._all)
+
+    # ------------------------------------------------------------------ 构建
+
+    def _rebuild(self) -> None:
+        self._token += 1
+        for card in self._cards.values():
+            card.setParent(None)
+            card.deleteLater()
+        self._cards.clear()
+        while self._gl.count():
+            item = self._gl.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+        self._pending = list(self._visible)
+        self._build_chunk(self._token)
+
+    def _build_chunk(self, token: int) -> None:
+        if token != self._token:
+            return
+        if not self._pending:
+            self._relayout()
+            return
+        chunk, self._pending = self._pending[:self.CHUNK], self._pending[self.CHUNK:]
+        for d in chunk:
+            card = _DramaCard(d, self._t, (self._w, self._h), self._holder)
+            card.clicked.connect(self._on_click)
+            card.set_status(self._status.get(str(d.get("did")), 0), d.get("episode_count"))
+            self._cards[card.key()] = card
+            url = (d.get("cover_url") or d.get("cover") or "").strip()
+            if url and self._cache is not None:
+                self._cache.request(card.key(), url, self._on_cover)
+            elif url:
+                card.cover.setText("待加载")
+            else:
+                card.set_cover(None)
+        self._relayout()
+        QTimer.singleShot(0, lambda t=token: self._build_chunk(t))
+
+    def _relayout(self) -> None:
+        while self._gl.count():
+            item = self._gl.takeAt(0)
+            if item.widget():
+                self._gl.removeWidget(item.widget())
+
+        avail = self.viewport().width() - 20
+        each = self._w + 16 + 10
+        cols = max(1, avail // each) if avail > 0 else 1
+        for idx, d in enumerate(self._visible):
+            card = self._cards.get(str(d.get("did")))
+            if card is not None:
+                card.setVisible(True)
+                self._gl.addWidget(card, idx // cols, idx % cols)
+
+    def _on_cover(self, key, image) -> None:
+        card = self._cards.get(str(key))
+        if card is not None:
+            card.set_cover(image)
+
+    def _on_click(self, drama: dict) -> None:
+        self._select(drama)
+
+    def _select(self, drama: dict) -> None:
+        self._current = drama
+        key = str(drama.get("did"))
+        for k, card in self._cards.items():
+            card.set_selected(k == key)
+        self.selected.emit(drama)
+
+    def resizeEvent(self, event) -> None:        # noqa: N802
+        super().resizeEvent(event)
+        if self._all:
+            self._relayout()
+
+
 class HuangguoPage(Page):
     key = "huangguo"
     title = "黄果短剧"
     subtitle = "先用代理读发布页拿最新镜像域名，之后浏览与下载都直连"
+    # 「上次停留在哪个站点」记在设置里的键名。短剧平台页继承本页，
+    # 但用自己的键，避免两个页面互相覆盖站点记忆。
+    _site_pref_key = "huangguo.site_id"
 
     # ---------------------------------------------------------------- 构建
     def build(self) -> None:
@@ -43,10 +342,14 @@ class HuangguoPage(Page):
         self._bridge = None
         self._dramas = []
         self._detail = None
+        self._detail_drama = None
+        self._cover = None
+        self._cover_site = ""
         self._eps_boxes: list[QCheckBox] = []
         self._row_keys: dict[tuple, int] = {}
         self._updates: list = []
         self._sync_targets: list[dict] = []
+        self._scanning = False
 
         btn_open = QPushButton("打开下载目录")
         btn_open.setObjectName("Ghost")
@@ -124,10 +427,24 @@ class HuangguoPage(Page):
         lh.addWidget(self.btn_online)
         lh.addWidget(self.btn_reload)
         ll.addLayout(lh)
-        self.table = make_table(["剧名", "集数", "评分", "最近发现"], [300, 60, 60, 120])
-        self.table.itemSelectionChanged.connect(self._on_select)
-        self.table.itemSelectionChanged.connect(self._preview_selected)
-        ll.addWidget(self.table, 1)
+
+        # 扫描下载目录：把「磁盘上已经有的集」写回库，卡片角标才会显示已下 N/M
+        oh = QHBoxLayout()
+        self.btn_scan = QPushButton("扫描下载目录")
+        self.btn_scan.setObjectName("Ghost")
+        self.btn_scan.setToolTip("用 ffprobe 逐个校验下载目录，把已经下好的集标记为「已下载」")
+        self.btn_scan.clicked.connect(self.scan_downloads)
+        self.lbl_scan = QLabel("")
+        self.lbl_scan.setObjectName("Muted")
+        oh.addWidget(self.btn_scan)
+        oh.addWidget(self.lbl_scan, 1)
+        ll.addLayout(oh)
+
+        # 尺寸与 hgcore.config.COVER_WIDTH/COVER_HEIGHT 保持一致；
+        # 这里写常量是为了不在建界面时就去初始化黄果后端（那会顺带建库）。
+        self.grid = _DramaGrid(_ui_tokens(), (160, 224), None)
+        self.grid.selected.connect(self._on_card_selected)
+        ll.addWidget(self.grid, 1)
         split.addWidget(left)
 
         right = Card()
@@ -172,7 +489,8 @@ class HuangguoPage(Page):
         dh.addWidget(self.btn_dl)
         rl.addLayout(dh)
         split.addWidget(right)
-        split.setSizes([560, 540])
+        # 剧库是封面网格，需要横向空间才能多排几列；详情/选集区窄一点够用
+        split.setSizes([760, 380])
         lay.addWidget(split, 1)
         return w
 
@@ -393,10 +711,36 @@ class HuangguoPage(Page):
             self.badge_site.set_tone("err")
             self.notify(f"黄果后端加载失败：{exc}", "err")
             return False
+        self._init_cover_cache()
         self._refresh_site_bar()
         self._init_queue()
         self._fill_sites()
         return True
+
+    def _init_cover_cache(self) -> None:
+        """建封面缓存（按站点分目录：不同站点的 did 会重名）。
+
+        黄果的封面是**加密图**，必须走 hgcore.media_crypto 解密，直接当普通
+        图片加载只会得到解不开的字节 —— 这就是之前「封面一个都没有」的原因。
+        """
+        ns = self._ns
+        if ns is None:
+            return
+        site = str(getattr(ns.config, "ACTIVE_SITE_ID", "") or "default")
+        if self._cover is not None and self._cover_site == site:
+            return
+        try:
+            self._cover = CoverCache(
+                paths.data_dir("huangguo", "covers", site),
+                decode=ns.media_crypto.decrypt_cover,
+                fetch=lambda u: ns.http_client.fetch_bytes(u, timeout=15),
+                size=(int(ns.config.COVER_WIDTH), int(ns.config.COVER_HEIGHT)),
+            )
+            self._cover_site = site
+            self.grid.set_cache(self._cover)
+        except Exception as exc:  # noqa: BLE001
+            self._cover = None
+            self.notify(f"封面缓存初始化失败：{exc}", "warn")
 
     def _on_tab(self, idx: int) -> None:
         if not self._ensure():
@@ -444,6 +788,10 @@ class HuangguoPage(Page):
         try:
             self.cmb_site.clear()
             for s in self._ns.sites.all_sites():
+                # enabled=False 的站（解析器还没补齐）先不显示，
+                # 免得切过去直接报错；站点定义里注明了原因。
+                if not s.get("enabled", True):
+                    continue
                 self.cmb_site.addItem(f"{s.get('name')} ({s.get('id')})", s.get("id"))
             cur = self._ns.config.ACTIVE_SITE_ID
             for i in range(self.cmb_site.count()):
@@ -463,7 +811,7 @@ class HuangguoPage(Page):
             return
         try:
             self._ns.config.set_active_site(site)
-            settings().set("huangguo.site_id", sid)
+            settings().set(self._site_pref_key, sid)
             settings().save()
             backend.apply_huangguo_settings(self._ns)
             self._refresh_site_bar()
@@ -541,7 +889,9 @@ class HuangguoPage(Page):
         def _run():
             rows = self._ns.library_db.list_dramas(site_id, limit=600)
             st = self._ns.library_db.stats(site_id)
-            return rows, st
+            # 一次聚合查询拿到全站「每部剧已下载集数」，用于卡片角标
+            status = self._ns.library_db.downloaded_status_map(site_id)
+            return rows, st, status
 
         task = Task(_run)
         task.done.connect(self._dramas_done)
@@ -550,56 +900,110 @@ class HuangguoPage(Page):
         CENTER.start(task)
 
     def _dramas_done(self, payload) -> None:
-        rows, st = payload
+        rows, st, status = payload
         self.btn_reload.setEnabled(True)
         self._dramas = list(rows or [])
-        self.table.setRowCount(0)
-        for d in self._dramas:
-            r = self.table.rowCount()
-            self.table.insertRow(r)
-            self.table.setItem(r, 0, self._item(d.get("title", ""), d))
-            self.table.setItem(r, 1, self._item(str(d.get("episode_count", "") or ""), d))
-            self.table.setItem(r, 2, self._item(str(d.get("score", "") or ""), d))
-            ts = d.get("last_seen") or 0
-            when = time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else "-"
-            self.table.setItem(r, 3, self._item(when, d))
+        self.grid.set_items(self._dramas, status)
         self._apply_stats_text(st)
-        if self._dramas:
-            self.table.selectRow(0)
+        self.grid.select_first()
+
+    def _filter(self, text: str) -> None:
+        self.grid.set_filter(text)
 
     @staticmethod
     def _item(text, user):
+        """表格单元格（更新检测/下载历史还在用表格，这里保留的小工具）。"""
         item = QTableWidgetItem(str(text))
         item.setData(Qt.ItemDataRole.UserRole, user)
         return item
 
-    def _filter(self, text: str) -> None:
-        kw = (text or "").strip().lower()
-        for r in range(self.table.rowCount()):
-            item = self.table.item(r, 0)
-            self.table.setRowHidden(
-                r, bool(kw) and kw not in (item.text().lower() if item else ""))
+    # -------------------------------------------------------- 扫描下载目录
+    def scan_downloads(self) -> None:
+        """用 ffprobe 校验下载目录，把磁盘上已完整的集回填成「已下载」。
 
-    def _on_select(self) -> None:
-        row = self.table.currentRow()
-        if row < 0 or row >= len(self._dramas):
+        为什么需要：库里的 episodes 状态只在**本程序下载完成**时写入。以前用
+        原版黄果下的、或者从别处拷进来的文件，库里一律不认识 —— 卡片全显示
+        「未下载」，点批量下载还会重复下。这里按剧逐个校验后回填。
+        """
+        if not self._ensure() or self._scanning:
             return
-        self.load_detail(self._dramas[row])
+        self._scanning = True
+        self.btn_scan.setEnabled(False)
+        self.lbl_scan.setText("扫描下载目录…")
+        site_id = self._ns.config.ACTIVE_SITE_ID
 
-    def _preview_selected(self) -> None:
-        row = self.table.currentRow()
-        if row < 0 or row >= len(self._dramas):
-            return
-        item = self.table.item(row, 0)
-        if not item:
-            return
-        d = item.data(Qt.ItemDataRole.UserRole) or {}
+        def _run(progress=None):
+            ns = self._ns
+            rows = ns.library_db.list_dramas(site_id, limit=10000)
+            total = len(rows)
+            found = 0
+            for i, d in enumerate(rows):
+                title = d.get("title") or ""
+                cnt = int(d.get("episode_count") or 0)
+                did = d.get("did")
+                if title and cnt > 0:
+                    known = ns.library_db.known_done_eps(site_id, did)
+                    eps = [e for e in range(1, cnt + 1) if e not in known]
+                    if eps:
+                        hit = ns.library_scan.scan_drama(title, eps)
+                        for ep, path in hit.items():
+                            try:
+                                size = path.stat().st_size
+                            except OSError:
+                                size = 0
+                            ns.library_db.set_episode_status(
+                                site_id, did, ep, ns.library_db.EP_DONE,
+                                file_path=str(path), size_bytes=size)
+                        found += len(hit)
+                if progress:
+                    progress(i + 1, total, f"{i + 1}/{total} 部 · 新识别 {found} 集")
+            return found, total
+
+        task = Task(_run, want_progress=True)
+        task.progress.connect(lambda p, t: self.lbl_scan.setText(t))
+        task.done.connect(self._scan_done)
+        task.failed.connect(self._scan_failed)
+        CENTER.start(task)
+
+    def _scan_done(self, payload) -> None:
+        found, total = payload
+        self._scanning = False
+        self.btn_scan.setEnabled(True)
+        self.lbl_scan.setText(f"扫描完成：{total} 部剧，新识别 {found} 集")
+        self.notify(f"扫描完成：新识别 {found} 集已下载", "ok" if found else "warn")
+        site_id = self._ns.config.ACTIVE_SITE_ID
+        try:
+            self.grid.refresh_status(self._ns.library_db.downloaded_status_map(site_id))
+            self._apply_stats_text(self._ns.library_db.stats(site_id))
+        except Exception:                       # noqa: BLE001
+            pass
+        if self._detail_drama:
+            self.load_detail(self._detail_drama)     # 右侧集数的 ✓ 也刷新一遍
+
+    def _scan_failed(self, tb: str) -> None:
+        self._scanning = False
+        self.btn_scan.setEnabled(True)
+        self.lbl_scan.setText("扫描失败")
+        self.notify((tb or "").splitlines()[-1][:160] if (tb or "").strip() else "扫描失败", "err")
+
+    def _on_card_selected(self, drama: dict) -> None:
+        """卡片被点中：右侧拉详情/集数，下方预览面板跟着换。"""
+        self.load_detail(drama)
+        self._preview_drama(drama)
+
+    def _preview_drama(self, drama: dict) -> None:
+        did = drama.get("did")
+        # 封面优先用磁盘缓存里已解密的那张：黄果封面是加密图，
+        # 直接把 cover_url 交给预览面板只会显示「封面无法解析」。
+        thumb = None
+        if self._cover is not None:
+            p = self._cover.disk_path(did)
+            if p.is_file():
+                thumb = str(p)
         self.preview.preview(
-            title=d.get("title", "") or "",
-            # 本地库 dramas 表的列名是 cover_url（不是 cover），
-            # 只取 "cover" 会永远拿到 None → 预览面板恒显示"无封面"。
-            thumb=d.get("cover_url") or d.get("cover") or None,
-            resolver=lambda drama=d: self._resolve_play_url(drama),
+            title=drama.get("title", "") or "",
+            thumb=thumb,
+            resolver=lambda d=drama: self._resolve_play_url(d),
         )
 
     def _resolve_play_url(self, drama: dict) -> str:
@@ -620,6 +1024,7 @@ class HuangguoPage(Page):
     def load_detail(self, drama: dict) -> None:
         if not self._ensure():
             return
+        self._detail_drama = drama
         did = drama.get("did")
         self.lbl_detail.setText(drama.get("title", "") or "-")
         self.lbl_detail_sub.setText("加载集数…")
@@ -681,15 +1086,14 @@ class HuangguoPage(Page):
     def enqueue(self) -> None:
         if not self._ensure():
             return
-        row = self.table.currentRow()
-        if row < 0 or row >= len(self._dramas):
-            self.notify("请先在剧库中选择一部剧", "warn")
+        drama = self.grid.current() or self._detail_drama
+        if not drama:
+            self.notify("请先在剧库中点选一部剧", "warn")
             return
         eps = [b.property("ep") for b in self._eps_boxes if b.isChecked()]
         if not eps:
             self.notify("请勾选要下载的集", "warn")
             return
-        drama = self._dramas[row]
         tasks = self._queue.add_many(drama.get("did"), drama.get("title", ""), eps)
         self.lbl_q.setText(f"已入队 {len(tasks)} 集")
         self.tabs.setCurrentIndex(1)
@@ -1039,17 +1443,37 @@ class HuangguoPage(Page):
         self.lbl_q.setText("在线抓取中…")
 
         def _run(progress=None):
-            cfg = self._ns.config
+            ns = self._ns
+            cfg = ns.config
             sid = cfg.ACTIVE_SITE_ID
-            rows = []
+            rows: list = []
+            from_cache = False
             cats = list(getattr(cfg, "CATEGORIES", []) or [])
             if cats:
-                name, url = cats[0][0], cats[0][1]
-                rows = self._ns.site_api.list_category_all(url, max_pages=pages)
+                _name, url = cats[0][0], cats[0][1]
+                # 网络优先（用户点「在线抓取」就是要最新的），
+                # 抓不到才回落到本地列表缓存 —— 黄果域名常换，断网/换域名时
+                # 有缓存至少还能看到上次的剧库，不至于整页空白。
+                try:
+                    rows = ns.site_api.list_category_all(url, max_pages=pages)
+                except Exception:               # noqa: BLE001
+                    rows = []
+                if rows:
+                    try:
+                        ns.cache.put_list(url, "category", rows, site_id=sid)
+                    except Exception:           # noqa: BLE001
+                        pass
+                else:
+                    try:
+                        rows = ns.cache.get_list(url, "category", site_id=sid,
+                                                 allow_stale=True) or []
+                        from_cache = bool(rows)
+                    except Exception:           # noqa: BLE001
+                        rows = []
             if not rows:
-                rows = self._ns.site_api.list_dramas()
-            n = self._ns.library_db.record_dramas(rows, sid) if rows else 0
-            return n, len(rows)
+                rows = ns.site_api.list_dramas()
+            n = ns.library_db.record_dramas(rows, sid) if rows else 0
+            return n, len(rows), from_cache
 
         task = Task(_run, want_progress=True)
         task.done.connect(self._online_done)
@@ -1060,7 +1484,8 @@ class HuangguoPage(Page):
 
     def _online_done(self, payload) -> None:
         self.btn_online.setEnabled(True)
-        n, total = payload
-        self.lbl_q.setText(f"在线抓取：入库 {n} / 抓到 {total}")
-        self.notify(f"在线抓取完成：入库 {n} 部", "ok" if n else "warn")
+        n, total, from_cache = payload
+        tag = "（离线缓存）" if from_cache else ""
+        self.lbl_q.setText(f"在线抓取{tag}：入库 {n} / 抓到 {total}")
+        self.notify(f"在线抓取完成{tag}：入库 {n} 部", "ok" if n else "warn")
         self.reload()

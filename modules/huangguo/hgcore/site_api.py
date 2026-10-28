@@ -127,15 +127,21 @@ def get_play_url_for(site_id: str, did, ep: int) -> str:
 # ---------------------------------------------------------------- 指定站点（并发安全）
 
 def detail_url_for(site_id: str, did) -> str:
-    """按站点构造详情页 URL（不依赖全局 BASE_URL）。"""
+    """按站点构造详情页 URL（不依赖全局 BASE_URL）。
+
+    路径取自站点的 urls.detail 模板：黄果树是 /detail/{did}/，黄桃短剧是
+    /drama/{did}/。硬编码成 /detail/ 会让新站点详情整片 404。
+    """
     site = sites.get_site(site_id) or config.ACTIVE_SITE
-    return site["base_url"].rstrip("/") + f"/detail/{did}/"
+    base = (site.get("base_url") or config.BASE_URL).rstrip("/")
+    return base + config.url_tpl(site, "detail").format(did=did)
 
 
 def load_detail_for(site_id: str, did, timeout: int = 20) -> dict:
     """按站点 ID 抓取并解析详情（并发安全：不改动全局 config）。
 
-    两个站点的详情页路径同为 /detail/{did}/，差异只在解析器，故按站点选后端。
+    详情路径与解析器都按站点走（黄果 /detail/ + hg-web-detail__，
+    黄桃 /drama/ + detail-top/nineEpisodeGrid）。
     """
     html = fetch_text(detail_url_for(site_id, did))
     return _backend_for(site_id).parse_detail_html(html)

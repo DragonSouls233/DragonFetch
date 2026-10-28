@@ -115,6 +115,13 @@ class YtTiktokPage(Page):
     title = "映取 · YouTube / TikTok"
     subtitle = "批量粘贴链接 → 解析元信息 → 选画质 → 并发下载（共享 bin/yt-dlp.exe）"
 
+    # ---------------------------------------------------------------- 内置浏览器
+    def home_url(self) -> str:
+        return "https://www.youtube.com/"
+
+    def browse_download_dir(self) -> str:
+        return settings().get("yttiktok.download_dir", "") or ""
+
     def build(self) -> None:
         s = settings()
         self._items: list = []          # [(url, VideoInfo|None, error)]

@@ -194,6 +194,18 @@ def main() -> int:
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     except Exception:
         pass
+
+    # 内置浏览器的一次性准备，**必须**在 QApplication 之前：
+    #   ① AA_ShareOpenGLContexts 要在 QApplication 前设，否则 WebEngine 黑屏；
+    #   ② Chromium 代理只能从命令行进（QNetworkProxy 对 WebEngine 无效，实测）；
+    #   ③ QtWebEngine 模块也要在此时完成 import。
+    # 顺序错了的典型症状：右侧浏览区一片黑，或进程直接退出且没有报错。
+    try:
+        from launcher.gui.browser import prepare_webengine
+        _web_ok = prepare_webengine()
+    except Exception:  # noqa: BLE001
+        _web_ok = False
+
     app = QApplication(sys.argv)
     app.setApplicationName(V.APP_NAME)
     app.setApplicationDisplayName(V.APP_NAME)
@@ -218,6 +230,15 @@ def main() -> int:
     from PyQt6.QtCore import QTimer
     from launcher.core import backend as _backend
     from launcher.core.tasks import CENTER, Task
+    from launcher.core.logbus import LOG
+    if not _web_ok:
+        # 不静默降级：用户至少要知道"为什么右边没有浏览器"
+        try:
+            from launcher.gui.browser import web_error
+            LOG.emit_log("warn", f"内置浏览器不可用：{web_error()}"
+                                 "（装 PyQt6-WebEngine 后重启即可）")
+        except Exception:  # noqa: BLE001
+            pass
     QTimer.singleShot(300, lambda: CENTER.start(Task(_backend.warm_up)))
 
     return app.exec()

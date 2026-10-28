@@ -15,6 +15,12 @@ from typing import Any, Dict
 
 from . import paths
 
+# 基准窗口尺寸：1080P。布局（侧栏 + 8 列站点表格 + 右侧内置浏览器）按这个宽度
+# 留的余量，改这里就能整体换基准。
+WINDOW_DEFAULT_W = 1920
+WINDOW_DEFAULT_H = 1080
+WINDOW_LAYOUT_TAG = "1920x1080"
+
 DEFAULTS: Dict[str, Any] = {
     "theme": "dark",
     "proxy": {
@@ -96,7 +102,12 @@ DEFAULTS: Dict[str, Any] = {
         "font_size": 10,
         "compact": False,
     },
-    "window": {"width": 1440, "height": 900, "last_page": "home"},
+    # 窗口按 1080P（1920×1080）设计：内置浏览器、8 列站点表格、详情页左右分栏
+    # 都按这个宽度留的余量。layout 是「布局版本」标记，换基准尺寸时改它，
+    # 老配置里记着的旧尺寸会被一次性重置（见 _migrate），之后用户自己拖的尺寸
+    # 仍然照旧记住。
+    "window": {"width": WINDOW_DEFAULT_W, "height": WINDOW_DEFAULT_H,
+               "layout": WINDOW_LAYOUT_TAG, "last_page": "home"},
 }
 
 
@@ -151,6 +162,15 @@ class Settings:
         if "sites/madouqu" in mq.replace("\\", "/") or "sites\\madouqu" in mq:
             self._data.setdefault("madouqu", {})["download_dir"] = str(
                 paths.data_dir("madouqu", "downloads"))
+
+        # 窗口基准从 1440×900 提到 1080P：旧配置里存着 1440×900（或用户早先拖出
+        # 来的小尺寸），只改 DEFAULTS 不生效，因为读出来的是存盘值。按 layout 标记
+        # 做一次性重置；重置后用户自己再拖尺寸仍会被 closeEvent 记住。
+        win = self._data.setdefault("window", {})
+        if str(win.get("layout", "")) != WINDOW_LAYOUT_TAG:
+            win["width"] = WINDOW_DEFAULT_W
+            win["height"] = WINDOW_DEFAULT_H
+            win["layout"] = WINDOW_LAYOUT_TAG
 
     def save(self) -> str:
         with self._lock:

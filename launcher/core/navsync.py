@@ -369,10 +369,18 @@ def _sync_huangguo(timeout: float, progress=None) -> Dict[str, Any]:
                                   save=True, allow_proxy=True, workers=8)
     verified = list(r.get("verified") or [])
     url = (r.get("switched_to") or getattr(ns.config, "BASE_URL", "") or "").rstrip("/")
+    # 记录域名是否被自动改写（用于同步报告提示，避免「静默改配置」）。
+    _switched_to = (r.get("switched_to") or "").rstrip("/")
+    _switched = bool(_switched_to) and _switched_to != cur.rstrip("/")
+    _switched_fields = {
+        "switched_from": cur.rstrip("/") if _switched else "",
+        "switched_to": _switched_to if _switched else "",
+    }
     if not verified:
         return {"ok": False, "url": url,
                 "error": "；".join((r.get("errors") or ["没有直连可用的镜像"])[-2:]),
-                "direct": False, "note": "发布页没有直连镜像（已保留原域名）"}
+                "direct": False, "note": "发布页没有直连镜像（已保留原域名）",
+                **_switched_fields}
     # mirror_refresh 的 verified 全部通过「直连内容校验」，可直接视为直连可用
     s.set("huangguo.proxy_enabled", False)
     s.save()
@@ -382,7 +390,8 @@ def _sync_huangguo(timeout: float, progress=None) -> Dict[str, Any]:
             "latency_ms": picked.get("ms", 0),
             "via": r.get("publish_page_used", ""),
             "note": f"发布页发现 {len(r.get('discovered') or [])} 个候选，"
-                    f"直连校验通过 {len(verified)} 个"}
+                    f"直连校验通过 {len(verified)} 个",
+            **_switched_fields}
 
 
 def _sync_madouqu(timeout: float, progress=None) -> Dict[str, Any]:

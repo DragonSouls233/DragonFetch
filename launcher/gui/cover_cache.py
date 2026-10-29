@@ -85,14 +85,18 @@ class CoverCache(QObject):
     def __init__(self, cache_dir: Path, *, decode: Optional[Callable[[bytes], Optional[bytes]]] = None,
                  fetch: Optional[Callable[[str], Optional[bytes]]] = None,
                  size: tuple[int, int] = (160, 224), max_mem: int = 1200,
-                 timeout: float = 15.0, parent=None):
+                 max_disk: int = 6000, timeout: float = 15.0, parent=None):
         super().__init__(parent)
         self.dir = Path(cache_dir)
         self.size = (int(size[0]), int(size[1]))
         self.max_mem = max(32, int(max_mem))
+        # 磁盘缓存上限：之前只有内存 LRU，磁盘侧只增不减，长期运行会无限膨胀。
+        # 0 表示不限制（保留旧行为）；>0 时超过则按文件 mtime 淘汰最旧的。
+        self.max_disk = max(0, int(max_disk))
         self.timeout = timeout
         self._decode = decode
         self._fetch = fetch or _default_fetch
+        self._disk_pruned_at = 0.0
 
         self._mem: "OrderedDict[object, QImage]" = OrderedDict()
         self._lock = threading.Lock()
@@ -251,6 +255,38 @@ class CoverCache(QObject):
             tmp.replace(self.disk_path(key))
         except OSError:
             pass
+        self._maybe_prune_disk()
+
+    def disk_count(self) -> int:
+        try:
+            return sum(1 for p in self.dir.glob("*.jpg") if p.is_file())
+        except OSError:
+            return 0
+
+    def _maybe_prune_disk(self) -> None:
+        """节流式磁盘清理：最多每 30 秒检查一次，超过 max_disk 则按 mtime 淘汰。"""
+        if self.max_disk <= 0:
+            return
+        import time as _time
+
+        now = _time.time()
+        if now - self._disk_pruned_at < 30.0:
+            return
+        self._disk_pruned_at = now
+        try:
+            files = [p for p in self.dir.glob("*.jpg") if p.is_file()]
+        except OSError:
+            return
+        if len(files) <= self.max_disk:
+            return
+        # 最旧的排前面（mtime 升序），删到比上限少 10%
+        files.sort(key=lambda p: p.stat().st_mtime)
+        keep = max(int(self.max_disk * 0.9), 1)
+        for p in files[: len(files) - keep]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     def _to_image(self, data: Optional[bytes]) -> Optional[QImage]:
         if not data:

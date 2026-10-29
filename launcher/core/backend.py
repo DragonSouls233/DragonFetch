@@ -682,5 +682,7 @@ def stats() -> dict:
     except Exception as exc:  # noqa: BLE001
         out["jiuse"] = {"error": str(exc)}
 
-    out["ytdlp"] = ytdlp_version()
+    # 首屏统计在后台线程跑；不要再同步 spawn yt-dlp 子进程（单次 ~3.7s），
+    # 交给 shell 的 _start_ytdlp_version_check 异步回填即可。
+    out["ytdlp"] = cached_ytdlp_version("检测中…")
     return out

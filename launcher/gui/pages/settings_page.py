@@ -251,11 +251,25 @@ class SettingsPage(Page):
             f"安装目录　{d['root']}",
             f"可执行　　{d['executable']}",
             f"数据占用　DATA {_human(data_size)}　TEMP {_human(temp_size)}",
-            f"yt-dlp　　{backend.ytdlp_version()}",
+            f"yt-dlp　　{backend.cached_ytdlp_version('检测中…')}",
             f"依赖　　　{', '.join(dep) or '（无）'}",
         ]
         self.lbl_info.setText("\n".join(lines))
         self._info_text = "\n".join(lines)
+        # 版本号若还是占位，后台查一次再回填（主线程绝不再同步 spawn 子进程）。
+        if not backend.cached_ytdlp_version(""):
+            self._refresh_ytdlp_async()
+
+    _ytdlp_task = None
+
+    def _refresh_ytdlp_async(self) -> None:
+        if self._ytdlp_task is not None and self._ytdlp_task.isRunning():
+            return
+        t = Task(backend.ytdlp_version)
+        t.done.connect(lambda _v: self._refresh_info())
+        t.failed.connect(lambda _tb: None)
+        self._ytdlp_task = t
+        CENTER.start(t)
 
     def _copy_info(self) -> None:
         QApplication.clipboard().setText(getattr(self, "_info_text", ""))

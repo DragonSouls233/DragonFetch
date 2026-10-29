@@ -31,6 +31,17 @@ from .. import theme
 from ..widgets import Badge, Card, HLine, SearchInput, make_table, open_path
 from .base import Page
 
+try:
+    from modules.tangxin.existing import norm_key as _norm_key
+except Exception:  # noqa: BLE001
+    def _norm_key(text):
+        """兜底：与 ``existing.norm_key`` 行为对齐（NFKC + casefold + 去空白）。"""
+        import re as _re
+        import unicodedata
+
+        s = unicodedata.normalize("NFKC", str(text or "")).casefold()
+        return _re.sub(r"\s+", "", s).strip()
+
 
 def _safe_name(text: str) -> str:
     s = re.sub(r'[\\/:*?"<>|]+', "_", (text or "").strip())
@@ -260,6 +271,10 @@ class TangxinPage(Page):
         self.badge_actors = Badge("0")
         lh.addWidget(t)
         lh.addWidget(self.badge_actors)
+        self.chk_dl_only = QCheckBox("只看已下载")
+        self.chk_dl_only.setToolTip("只显示「已下载数量 > 0」的演员（一眼看出谁下过）")
+        self.chk_dl_only.stateChanged.connect(self._apply_actor_filter)
+        lh.addWidget(self.chk_dl_only)
         lh.addStretch(1)
         self.btn_actors = QPushButton("加载演员云")
         self.btn_actors.setToolTip(
@@ -496,8 +511,9 @@ class TangxinPage(Page):
             pass
 
     def _on_index_ready(self) -> None:
-        """索引建完（或本来就是新的）：重算「本地状态」列。"""
+        """索引建完（或本来就是新的）：重算「本地状态」列 + 演员已下载标记。"""
         self._refresh_local_status()
+        self._refresh_actor_dl()
 
     def _ensure_backend(self) -> bool:
         if self._ns is not None:
@@ -604,7 +620,7 @@ class TangxinPage(Page):
             return []
 
     def _fill_actors(self, actors) -> None:
-        """把演员列表填进左栏（缓存/联网结果共用）。"""
+        """把演员列表填进左栏（缓存/联网结果共用），并补「已下 N」标记。"""
         self._actors = list(actors or [])
         self.badge_actors.setText(str(len(self._actors)))
         self.list_actors.blockSignals(True)
@@ -614,6 +630,61 @@ class TangxinPage(Page):
             item.setData(Qt.ItemDataRole.UserRole, a)
             self.list_actors.addItem(item)
         self.list_actors.blockSignals(False)
+        # 索引就绪后（或此刻已有）补「已下 N」角标 + 强调色；索引没建好时先
+        # 出列表，随后 _on_index_ready 会再刷一遍。
+        self._refresh_actor_dl()
+
+    def _refresh_actor_dl(self) -> None:
+        """（重）计算每位演员的已下载数量，更新文案 + 强调色标记。
+
+        与作品表的「本地状态」列同源：都来自 ``existing.downloaded_count_by_actor``
+        （按规范化演员名统计）。已下过的演员在前面加「✓」并上绿色，方便一眼看出
+        谁下过、谁没下过。
+        """
+        dl: dict = {}
+        try:
+            if self._ns is not None:
+                dl = (self._ns.existing.get_index().downloaded_count_by_actor()
+                      or {})
+        except Exception:                                   # noqa: BLE001
+            dl = {}
+        self._dl_by_actor = dl
+        for i in range(self.list_actors.count()):
+            item = self.list_actors.item(i)
+            if item is None:
+                continue
+            a = item.data(Qt.ItemDataRole.UserRole)
+            if a is None:
+                continue
+            n = dl.get(_norm_key(a.name), 0)
+            base = f"{a.name}  ({a.count})"
+            if n > 0:
+                item.setText(f"✓ {base}  已下 {n}")
+                item.setForeground(QBrush(QColor("#36c275")))
+            else:
+                item.setText(base)
+        self._apply_actor_filter()
+
+    def _filter_actors(self, text: str) -> None:
+        """演员搜索框输入：记录关键字后重算可见性。"""
+        self._actor_kw = (text or "").strip().lower()
+        self._apply_actor_filter()
+
+    def _apply_actor_filter(self) -> None:
+        """统一过滤：搜索关键字 + 「只看已下载」复选框同时生效。"""
+        kw = getattr(self, "_actor_kw", "")
+        dl = getattr(self, "_dl_by_actor", {}) or {}
+        only_dl = bool(getattr(self, "chk_dl_only", None)
+                       and self.chk_dl_only.isChecked())
+        for i in range(self.list_actors.count()):
+            item = self.list_actors.item(i)
+            if item is None:
+                continue
+            a = item.data(Qt.ItemDataRole.UserRole)
+            name = (a.name if a else item.text()).lower()
+            hide_kw = bool(kw) and kw not in name
+            hide_dl = bool(only_dl) and (a is None or dl.get(_norm_key(a.name), 0) == 0)
+            item.setHidden(bool(hide_kw or hide_dl))
 
     def load_actors(self, force: bool = False) -> None:
         """加载演员云：**缓存优先**，后台再联网增量同步。
@@ -692,12 +763,6 @@ class TangxinPage(Page):
             return
         self.lbl_q.setText("演员云加载失败")
         self.notify((tb or "").splitlines()[-1][:160] if tb else "加载失败", "err")
-
-    def _filter_actors(self, text: str) -> None:
-        kw = (text or "").strip().lower()
-        for i in range(self.list_actors.count()):
-            item = self.list_actors.item(i)
-            item.setHidden(bool(kw) and kw not in item.text().lower())
 
     def _actor_changed(self, row: int) -> None:
         if row < 0:

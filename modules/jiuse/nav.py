@@ -51,6 +51,51 @@ _SKIP_HOSTS = ("pages.dev", "github.io", "t.me", "telegram", "twitter.com",
                "dizhi9", "gstatic", "w3.org")
 
 
+# 已实测不可达的兜底域名（**留档，默认不纳入** ``_fallback_domains()``）。
+# 需要时可手动把这里的条目并回默认序列；不要不经复测就直接启用。
+# 实测 2026-10-29 23:48（系统代理 127.0.0.1:10808 生效）：
+#   * 91porney.com          → 「未能解析此远程名称」（DNS 失效 / 域名废弃）
+#   * 91tanhua301~350.sbs   → HEAD/GET 全部操作超时（抽测 301/320/325/350 四个
+#     编号均超时，判定整段不可达）
+_DEPRECATED_FALLBACK_DOMAINS: tuple = (
+    "91porney.com",
+    *[f"91tanhua{i}.sbs" for i in range(301, 351)],
+)
+
+
+def _fallback_domains() -> List[str]:
+    """静态兜底域名清单（地址页 HTML + 外链 JS 都抽不到线路时直接用）。
+
+    九色地址页正文经常是空壳、外链 JS（``lib.kingslord.com/dizhi/publish.js``）
+    在当前/用户网络下也可能取不到 ⇒ 纯靠网络解析会永远拿不到候选。这里给一份
+    **实测可达**的域名直接去探测，至少让界面有几条可探线路，并诚实报告成败。
+
+    实测留档（2026-10-29 23:48，系统代理 127.0.0.1:10808 生效）
+    --------------------------------------------------------------------
+    基线可用：baidu HTTP 200、google HTTP 200、ip.sb HTTP 204（证明代理正常）。
+    探测方法：逐域名 HEAD（8s 超时）+ GET（10s 超时）。
+
+    逐条结论：
+      * ``jiuse.icu``    → HEAD 超时，但 **GET HTTP 200**（可达；HEAD 超时是
+        站点对 HEAD 的处理问题，GET 才是真实可用性）
+      * ``91porny.com``  → HEAD 返回 204（WAF 对 HEAD 的假象），**GET HTTP 200**
+        （可达）
+      * ``91porney.com`` → **未能解析此远程名称**（DNS 失效 / 域名废弃）
+      * ``91tanhua301.sbs`` / ``91tanhua320.sbs`` / ``91tanhua325.sbs`` /
+        ``91tanhua350.sbs`` → HEAD 与 GET **全部操作超时**（抽测 4 个不同编号，
+        判定 91tanhua301~350.sbs 整段不可达）
+
+    为何只保留 2 条（用户长期偏好）
+    --------------------------------------------------------------------
+    「实测拿不到数据的源别塞进序列（只会拖慢每次刮削）」。原 53 条里
+    50 条 sbs + 91porney 全是 0 命中死源，逐条探测会把每次「地址刷新」
+    拖成几十秒到几分钟的假死。已实测不可达的域名从「每次必试」序列里
+    **降级移除**，留档在 ``_DEPRECATED_FALLBACK_DOMAINS``（需要时可手动并入）。
+    返回格式不变：纯主机名列表，由 ``refresh()`` 拼上 ``https://`` 后探测。
+    """
+    return ["jiuse.icu", "91porny.com"]
+
+
 
 def _data_dir() -> Path:
     """数据目录：优先 DF_DATA_ROOT（前端注入根 DATA），否则模块内 DATA。"""
@@ -273,10 +318,12 @@ def refresh(nav_url: str = "", timeout: float = 8.0,
         say(0, len(cands), f"脚本里解析出 {len(cands)} 条线路")
 
     if not cands:
-        prev = _load_state()
-        return {"ok": False, "error": "地址页里没有解析到任何线路",
-                "addresses": prev.get("addresses", []), "via": via,
-                "cached": True, "nav_url": nav_url}
+        # 外部源兜底：地址页（HTML + 外链 JS）全抽不到时，用一份静态清单直接
+        # 探测。九色地址页常因外链 JS 取不到而整页空壳，纯靠网络解析会永远拿
+        # 不到候选；这里至少给界面几条可探线路，并诚实报告成败。
+        fb = _fallback_domains()
+        cands = [{"url": "https://" + h, "host": h, "label": h} for h in fb]
+        say(0, len(cands), f"地址页无候选，改用静态兜底域名 {len(cands)} 条")
 
     targets = cands[:max(max_check, 1)]
     say(0, len(targets), f"并行探测 {len(targets)} 条线路…")
@@ -347,7 +394,7 @@ def refresh(nav_url: str = "", timeout: float = 8.0,
             "active_direct": bool(active_item.get("direct")),
             "nav_via_proxy": bool(nav_via_proxy),
             "nav_url_reachable": True,
-            "error": "" if good else "候选线路都不可用（已保留缓存）"}
+            "error": "" if good else "候选线路均不可用（可能是网络不通或地址页失效，已保留上次缓存）"}
 
 
 def current() -> dict:

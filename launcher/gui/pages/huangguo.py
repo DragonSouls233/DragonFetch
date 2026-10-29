@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap
@@ -173,6 +174,18 @@ class HuangguoPage(Page):
         lh.addWidget(self.sp_pages)
         lh.addWidget(self.btn_online)
         lh.addWidget(self.btn_reload)
+        # 「抓取全部剧库（N 页）」：一次性把站点前 N 页都抓回本地库，
+        # 用户不必反复点「加载更多」联网等待（原版一次全加载的体验）。
+        self.sp_fetch_all = QSpinBox()
+        self.sp_fetch_all.setRange(1, 100)
+        self.sp_fetch_all.setValue(20)
+        self.sp_fetch_all.setToolTip("一次性抓取前 N 页剧库（后台进行，带进度）")
+        self.btn_fetch_all = QPushButton("抓取全部剧库")
+        self.btn_fetch_all.setObjectName("Primary")
+        self.btn_fetch_all.setToolTip("一次性把站点前 N 页全部抓回本地库，避免反复点「加载更多」")
+        self.btn_fetch_all.clicked.connect(self.fetch_all_library)
+        lh.addWidget(self.sp_fetch_all)
+        lh.addWidget(self.btn_fetch_all)
         ll.addLayout(lh)
 
         # 扫描下载目录：把「磁盘上已经有的集」写回库，卡片角标才会显示已下 N/M
@@ -192,6 +205,18 @@ class HuangguoPage(Page):
             "下次打开（或断网时）直接读磁盘，不用等网络。")
         self.btn_warm.clicked.connect(self.warm_covers)
         oh.addWidget(self.btn_warm)
+        # 扫描额外盘符/目录：识别「从原版黄果拷进来」、或落在非下载目录里的文件。
+        # 选过的目录记在 self._scan_roots，扫描时一并按 {剧名}/* 去匹配集号。
+        self._scan_roots = []
+        self.btn_scan_dir = QPushButton("扫描目录…")
+        self.btn_scan_dir.setObjectName("Ghost")
+        self.btn_scan_dir.setToolTip(
+            "选择额外的盘符/目录（含从原版黄果拷进来的文件），一起识别已下载的集")
+        self.btn_scan_dir.clicked.connect(self.scan_extra_dir)
+        oh.addWidget(self.btn_scan_dir)
+        self.lbl_scan_roots = QLabel("")
+        self.lbl_scan_roots.setObjectName("Muted")
+        oh.addWidget(self.lbl_scan_roots)
         ll.addLayout(oh)
 
         # 尺寸与 hgcore.config.COVER_WIDTH/COVER_HEIGHT 保持一致；
@@ -793,19 +818,24 @@ class HuangguoPage(Page):
         return item
 
     # -------------------------------------------------------- 扫描下载目录
-    def scan_downloads(self) -> None:
+    def scan_downloads(self, extra_roots=None) -> None:
         """用 ffprobe 校验下载目录，把磁盘上已完整的集回填成「已下载」。
 
         为什么需要：库里的 episodes 状态只在**本程序下载完成**时写入。以前用
         原版黄果下的、或者从别处拷进来的文件，库里一律不认识 —— 卡片全显示
         「未下载」，点批量下载还会重复下。这里按剧逐个校验后回填。
+
+        ``extra_roots`` 是额外要扫的盘符/目录（从「扫描目录…」按钮加进来的，
+        含从原版黄果拷进来的文件）：每个剧除默认下载目录外，也在这些根下按
+        ``{剧名}/*`` 去匹配集号。命中即回填，避免重复下载。
         """
         if not self._ensure() or self._scanning:
             return
         self._scanning = True
         self.btn_scan.setEnabled(False)
-        self.lbl_scan.setText("扫描下载目录…")
+        self.btn_scan_dir.setEnabled(False)
         site_id = self._ns.config.ACTIVE_SITE_ID
+        roots = [None] + [Path(str(r)) for r in (extra_roots or []) if r]
 
         def _run(progress=None):
             ns = self._ns
@@ -817,22 +847,26 @@ class HuangguoPage(Page):
                 cnt = int(d.get("episode_count") or 0)
                 did = d.get("did")
                 if title and cnt > 0:
-                    known = ns.library_db.known_done_eps(site_id, did)
+                    known = set(ns.library_db.known_done_eps(site_id, did) or [])
                     eps = [e for e in range(1, cnt + 1) if e not in known]
                     if eps:
-                        hit = ns.library_scan.scan_drama(title, eps)
-                        for ep, path in hit.items():
-                            try:
-                                size = path.stat().st_size
-                            except OSError:
-                                size = 0
-                            ns.library_db.set_episode_status(
-                                site_id, did, ep, ns.library_db.EP_DONE,
-                                file_path=str(path), size_bytes=size)
-                        found += len(hit)
+                        for root in roots:
+                            hit = ns.library_scan.scan_drama(title, eps, root)
+                            for ep, path in hit.items():
+                                if ep in known:
+                                    continue
+                                try:
+                                    size = path.stat().st_size
+                                except OSError:
+                                    size = 0
+                                ns.library_db.set_episode_status(
+                                    site_id, did, ep, ns.library_db.EP_DONE,
+                                    file_path=str(path), size_bytes=size)
+                                known.add(ep)
+                                found += 1
                 if progress:
                     progress(i + 1, total, f"{i + 1}/{total} 部 · 新识别 {found} 集")
-            return found, total
+            return found, total, len(roots)
 
         task = Task(_run, want_progress=True)
         task.progress.connect(lambda p, t: self.lbl_scan.setText(t))
@@ -840,10 +874,39 @@ class HuangguoPage(Page):
         task.failed.connect(self._scan_failed)
         CENTER.start(task)
 
+    def scan_extra_dir(self) -> None:
+        """选择额外盘符/目录并扫描（识别从原版黄果拷进来的文件）。"""
+        from PyQt6.QtWidgets import QFileDialog
+
+        picked = QFileDialog.getExistingDirectory(
+            self, "选择要扫描的盘符/目录（递归查找已下载的剧）", "")
+        if not picked:
+            return
+        np_ = os.path.normpath(picked)
+        if np_ in [os.path.normpath(r) for r in self._scan_roots]:
+            self.notify("该目录已在扫描列表里", "warn")
+            return
+        self._scan_roots.append(np_)
+        self.lbl_scan_roots.setText(
+            "额外扫描：" + "、".join(os.path.basename(r) for r in self._scan_roots))
+        self.scan_downloads(extra_roots=self._scan_roots)
+
+    def fetch_all_library(self) -> None:
+        """一次性把站点前 N 页全部抓回本地库（N 取「抓取全部剧库」微调框）。
+
+        原版黄果是「一次全加载」，本程序先前只能反复点「加载更多」联网。这里
+        复用既有 ``fetch_online(pages=N, append=True)`` + 进度条，一次性抓完，
+        不重写抓取/进度逻辑。
+        """
+        pages = int(self.sp_fetch_all.value())
+        self.lbl_q.setText(f"一次性抓取前 {pages} 页剧库…")
+        self.fetch_online(pages=pages, append=True)
+
     def _scan_done(self, payload) -> None:
-        found, total = payload
+        found, total, _roots = payload
         self._scanning = False
         self.btn_scan.setEnabled(True)
+        self.btn_scan_dir.setEnabled(True)
         self.lbl_scan.setText(f"扫描完成：{total} 部剧，新识别 {found} 集")
         self.notify(f"扫描完成：新识别 {found} 集已下载", "ok" if found else "warn")
         site_id = self._ns.config.ACTIVE_SITE_ID
@@ -858,6 +921,7 @@ class HuangguoPage(Page):
     def _scan_failed(self, tb: str) -> None:
         self._scanning = False
         self.btn_scan.setEnabled(True)
+        self.btn_scan_dir.setEnabled(True)
         self.lbl_scan.setText("扫描失败")
         self.notify((tb or "").splitlines()[-1][:160] if (tb or "").strip() else "扫描失败", "err")
 

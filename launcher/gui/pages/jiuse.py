@@ -119,9 +119,9 @@ class JiusePage(Page):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab_main(), "线路与采集")
+        self.tabs.addTab(self._tab_library(), "本地下载剧库")
         self.tabs.addTab(self._tab_records(), "检测与下载记录")
-        self.tabs.currentChanged.connect(
-            lambda i: self.reload_records() if i == 1 else None)
+        self.tabs.currentChanged.connect(self._on_jiuse_tab_changed)
         # 2026-10-29：预览面板已屏蔽（同媒体库其它模块），宽度全部给封面墙。
         self.preview = None
         self.set_content(self.tabs)
@@ -326,6 +326,116 @@ class JiusePage(Page):
         lay.addWidget(self.table_dl, 1)
         return w
 
+    # ---------------------------------------------------------------- 本地库
+    def _tab_library(self) -> QWidget:
+        """本地下载剧库：扫描「九色下载目录」下的视频文件并列出（含从下载记录补）。
+
+        九色下载不保存封面，所以这里以**列表**呈现（不强行塞封面）；标题/大小/
+        修改时间/路径一目了然，方便核对「下过哪些」。
+        """
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        bar = Card()
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(14, 10, 14, 10)
+        bl.setSpacing(8)
+        t = QLabel("本地下载剧库")
+        t.setObjectName("H2")
+        bl.addWidget(t)
+        self.btn_lib_scan = QPushButton("扫描本地下载")
+        self.btn_lib_scan.setObjectName("Primary")
+        self.btn_lib_scan.clicked.connect(self._scan_local_library)
+        bl.addWidget(self.btn_lib_scan)
+        self.lbl_lib = QLabel("尚未扫描")
+        self.lbl_lib.setObjectName("Muted")
+        bl.addWidget(self.lbl_lib, 1)
+        lay.addWidget(bar)
+
+        self.table_lib = make_table(
+            ["标题", "大小", "修改时间", "状态", "路径"],
+            [320, 100, 160, 90, 460])
+        self.table_lib.setMinimumHeight(260)
+        lay.addWidget(self.table_lib, 1)
+
+        hint = QLabel(
+            "扫描「设置→九色下载目录」下的视频文件，列出已下载内容"
+            "（九色下载不存封面，故以列表呈现；也并入下载记录里残留的条目）。")
+        hint.setObjectName("Muted")
+        lay.addWidget(hint)
+        return w
+
+    def _on_jiuse_tab_changed(self, index: int) -> None:
+        text = self.tabs.tabText(index)
+        if text == "检测与下载记录":
+            self.reload_records()
+        elif text == "本地下载剧库":
+            self._scan_local_library()
+
+    def _scan_local_library(self) -> None:
+        """扫描九色下载目录，把已下载的视频列进「本地下载剧库」表格。"""
+        try:
+            self._ns = self._ns or backend.jiuse()
+        except Exception:  # noqa: BLE001
+            self._ns = None
+        d = settings().get("jiuse.download_dir", "") or ""
+        self.table_lib.setRowCount(0)
+        rows: list[tuple] = []  # (title, size, mtime_str, status, path)
+        if d and os.path.isdir(d):
+            exts = (".mp4", ".mkv", ".webm", ".flv", ".ts", ".mov", ".avi")
+            for root, _dirs, files in os.walk(d):
+                for f in files:
+                    if f.lower().endswith(exts):
+                        p = os.path.join(root, f)
+                        try:
+                            st = os.stat(p)
+                        except OSError:
+                            continue
+                        title = os.path.splitext(f)[0]
+                        mtime = time.strftime(
+                            "%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+                        rows.append((title, st.st_size, mtime, "已下载", p))
+        # 也并入下载记录里「文件已不在但库里有记录」的条目（避免漏看）
+        try:
+            for r in (self._ns.db.recent_downloads(800) if self._ns else []):
+                fp = r.get("file_path") or ""
+                if fp and os.path.isfile(fp):
+                    continue  # 已通过文件扫描计入
+                title = (r.get("title") or os.path.splitext(
+                    os.path.basename(fp))[0] or "(未知)")
+                ts = int(r.get("finished_at") or r.get("created_at") or 0)
+                mtime = (time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+                         if ts else "-")
+                status = "完成" if r.get("status") == "done" else (r.get("status") or "")
+                rows.append((title, int(r.get("size") or 0), mtime,
+                             status or "记录", fp or r.get("url") or ""))
+        except Exception:  # noqa: BLE001
+            pass
+        rows.sort(key=lambda x: x[2], reverse=True)
+        for title, size, mtime, status, p in rows:
+            i = self.table_lib.rowCount()
+            self.table_lib.insertRow(i)
+            self.table_lib.setItem(i, 0, QTableWidgetItem(str(title)))
+            self.table_lib.setItem(i, 1, QTableWidgetItem(self._fmt_size(size)))
+            self.table_lib.setItem(i, 2, QTableWidgetItem(str(mtime)))
+            self.table_lib.setItem(i, 3, QTableWidgetItem(str(status)))
+            self.table_lib.setItem(i, 4, QTableWidgetItem(str(p)))
+        self.lbl_lib.setText(
+            f"共 {len(rows)} 个文件"
+            + (f" · 目录：{d}" if d else " · 未配置下载目录"))
+
+    @staticmethod
+    def _fmt_size(num_bytes: float) -> str:
+        """字节数格式化为 KB / MB / GB（与黄果侧同款）。"""
+        if not num_bytes or num_bytes <= 0:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        import math
+        idx = min(int(math.log(num_bytes, 1024)), len(units) - 1)
+        return f"{num_bytes / (1024 ** idx):.1f} {units[idx]}"
+
     # ---------------------------------------------------------------- 后端
     def on_show(self) -> None:
         if self._ns is not None:
@@ -347,6 +457,8 @@ class JiusePage(Page):
             self._auto_loaded = True
             if self.table.rowCount() == 0:
                 QTimer.singleShot(250, lambda: self.grab_page(""))
+        # 顺带把「本地下载剧库」扫一遍（不阻塞、不联网），进 tab 时也会再扫。
+        self._scan_local_library()
 
     def _apply_state(self, st: dict) -> None:
         items = list(st.get("addresses") or [])

@@ -67,6 +67,7 @@ class _PlatformWall(CoverGrid):
 
     def set_rows(self, rows: list[dict]) -> None:
         items = []
+        status: dict[str, int] = {}
         for r in rows or []:
             sid = str(r.get("site_id") or "")
             did = str(r.get("did") or "")
@@ -77,18 +78,34 @@ class _PlatformWall(CoverGrid):
             url = str(r.get("cover_url") or "").strip()
             if not url.lower().startswith(("http://", "https://")):
                 url = ""
+            # 副标题优先显示「已下 N/M」（黄果主库已下载集数一眼可见），
+            # 没有已下信息时再退回到评分，让聚合条目也能看出下载状态。
+            done = int(r.get("done_eps") or 0)
+            total = int(r.get("ep_count") or 0)
+            if total:
+                sub = f"已下 {done}/{total}"
+            else:
+                sub = f"{r.get('score') or ''}分" if r.get("score") else ""
+            key = f"{sid}:{did}"
             items.append({
-                "key": f"{sid}:{did}",
+                "key": key,
                 "cover": url,
                 "title": str(r.get("title") or ""),
-                "total": int(r.get("ep_count") or 0),
-                "sub": f"{r.get('score') or ''}分" if r.get("score") else "",
+                "total": total,
+                "sub": sub,
                 "data": r,
             })
+            # 把已下载集数透传给封面的「已下 N/M / 已下载」角标（QA-10-01）。
+            # CoverGrid.set_items 会用 status[key] 给卡片 set_status；key 必须与
+            # item["key"] 完全一致（跨站 did 会重名，故带 site_id 前缀）。
+            # done=0 不放（get 默认 0，角标本就不显示）；total<=0 时 _render_badge
+            # 会因 total<=0 自动隐藏，无需在此特判。
+            if done > 0:
+                status[key] = done
         # 有封面的排前面（稳定排序，不打乱同组内的原有顺序）：
         # 1000+ 条里混着两百多条没图的，不排的话首屏可能整屏都是空卡。
         items.sort(key=lambda d: 0 if d["cover"] else 1)
-        self.set_items(items)
+        self.set_items(items, status)
 
 
 class DuanjuPage(HuangguoPage):
@@ -106,6 +123,9 @@ class DuanjuPage(HuangguoPage):
         # 所以插完要显式切回 0，否则进来看到的是剧库页。
         self.tabs.insertTab(0, self._tab_platform(), "平台总览")
         self.tabs.setCurrentIndex(0)
+        # 全部聚合：把各平台统一库的内容并成一个网格，进「剧库」区即可直接浏览
+        # 全部平台内容、双击切到对应平台下载（黄果已下载集数以绿色角标呈现）。
+        self.tabs.insertTab(1, self._tab_aggregated(), "全部聚合")
         self._platform_rows: list[dict] = []
         self._scan_task = None
 
@@ -218,6 +238,63 @@ class DuanjuPage(HuangguoPage):
         if idx >= 0:
             self.cmb_platform.setCurrentIndex(idx)
         self._switch_to_platform()
+
+    # ---------------------------------------------------------------- 全部聚合
+    def _tab_aggregated(self) -> QWidget:
+        """把各平台统一库内容并成一个封面墙，进「剧库」区即可直接浏览/下载。"""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        bar = Card()
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(14, 10, 14, 10)
+        bl.setSpacing(8)
+        t = QLabel("全部聚合")
+        t.setObjectName("H2")
+        bl.addWidget(t)
+        self.btn_agg_reload = QPushButton("刷新聚合库")
+        self.btn_agg_reload.setObjectName("Ghost")
+        self.btn_agg_reload.clicked.connect(self._refresh_aggregated)
+        bl.addWidget(self.btn_agg_reload)
+        self.ed_agg_filter = SearchInput("筛选剧名…", width=200)
+        self.ed_agg_filter.textChanged.connect(self._refresh_aggregated)
+        bl.addWidget(self.ed_agg_filter)
+        self.lbl_agg_stats = QLabel("尚未加载")
+        self.lbl_agg_stats.setObjectName("Muted")
+        bl.addWidget(self.lbl_agg_stats, 1)
+        lay.addWidget(bar)
+
+        self.wall_aggregated = _PlatformWall(_ui_tokens())
+        # 复用平台总览的双击逻辑：切到该平台并继续浏览、选集、下载
+        self.wall_aggregated.activated.connect(self._on_wall_open)
+        lay.addWidget(self.wall_aggregated, 1)
+
+        hint = QLabel(
+            "双击卡片：切到该平台并在「剧库」继续浏览、选集、下载。"
+            "绿色角标＝该平台已下载集数（黄果主库已下过的会显示「已下 N/M」）。")
+        hint.setObjectName("Muted")
+        lay.addWidget(hint)
+        return w
+
+    def _refresh_aggregated(self) -> None:
+        """从聚合库读全部内容填进封面墙（按筛选词过滤）。"""
+        if self._ns is None:
+            return
+        try:
+            rows = list(self._ns.platform.list_catalog())
+        except Exception:  # noqa: BLE001
+            rows = []
+        kw = (self.ed_agg_filter.text().strip()
+              if hasattr(self, "ed_agg_filter") else "")
+        if kw:
+            rows = [r for r in rows if kw in str(r.get("title") or "")]
+        self.wall_aggregated.set_rows(rows)
+        sites = len({str(r.get("site_id") or "") for r in rows})
+        self.lbl_agg_stats.setText(
+            f"共 {len(rows)} 条 · 跨 {sites} 个平台"
+            + (f"（筛选「{kw}」）" if kw else ""))
 
     # ---------------------------------------------------------------- 站点
     def _fill_platforms(self) -> None:
@@ -416,6 +493,7 @@ class DuanjuPage(HuangguoPage):
         self._fill_platforms()
         self._load_platform_rows()
         self._reload_platform_table()
+        self._refresh_aggregated()
 
     def _load_platform_rows(self) -> None:
         """从聚合库里读回已收录的剧目（不用先扫描就能看到历史结果）。"""

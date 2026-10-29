@@ -448,6 +448,11 @@ class CoverGrid(QScrollArea):
     def current(self) -> dict | None:
         return self._current
 
+    def items_for_keys(self, keys) -> list[dict]:
+        """批量下载用：把选中的 key 还原成 item 字典（含原始 data 对象）。"""
+        want = {str(k) for k in (keys or [])}
+        return [d for d in self._all if str(d.get("key")) in want]
+
     def count(self) -> int:
         return len(self._all)
 

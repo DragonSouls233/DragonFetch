@@ -350,6 +350,11 @@ class TangxinPage(Page):
         bottom.addWidget(QLabel("并发"))
         bottom.addWidget(self.sp_parallel)
         bottom.addWidget(self.btn_download)
+        self.btn_wall_batch = QPushButton("批量选择")
+        self.btn_wall_batch.setObjectName("Ghost")
+        self.btn_wall_batch.setToolTip("进入封面墙多选模式：勾选多部作品后点底部「批量下载」")
+        self.btn_wall_batch.clicked.connect(lambda: self.wall.enter_select_mode())
+        bottom.addWidget(self.btn_wall_batch)
         rrl.addLayout(bottom)
         split.addWidget(right)
         split.setSizes([320, 860])
@@ -747,6 +752,22 @@ class TangxinPage(Page):
         self.wall.selected.connect(self._on_wall_selected)
         self.wall.activated.connect(self._on_wall_activated)
         self.wall.setMinimumHeight(260)
+        # 封面墙多选下载：勾选多部作品 → 在列表里打勾 → 走既有下载流
+        self.wall.batch_download_requested.connect(self._wall_batch_download)
+        # 排序：按标题 / 按时长（时长形如 12:34，转成秒做数值排序）
+        def _dur_sec(d):
+            s = str(d.get("sub") or "").strip()
+            parts = s.split(":")
+            try:
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + int(parts[1])
+                return int(s)
+            except (TypeError, ValueError):
+                return 0
+        self.wall.set_sort_options([
+            {"label": "按标题", "key": "title"},
+            {"label": "按时长长→短", "key": "sub", "reverse": True, "fn": _dur_sec},
+        ])
 
     def _on_wall_selected(self, item: dict) -> None:
         v = item.get("data") or item
@@ -1178,6 +1199,29 @@ class TangxinPage(Page):
         self.btn_download.setEnabled(False)
         self.lbl_q.setText(f"下载中 · {len(videos)} 部 · 并发 {self.sp_parallel.value()}")
         self._worker.start()
+
+    # --------------------------------------------------- 封面墙批量下载
+    def _wall_batch_download(self, keys: list) -> None:
+        """封面墙多选后点「批量下载」：把选中的作品在列表里打勾，再走下载流。"""
+        want = {str(k) for k in keys}
+        if not want:
+            return
+        self.table_videos.blockSignals(True)
+        n = 0
+        for r in range(self.table_videos.rowCount()):
+            cell = self.table_videos.item(r, 0)
+            if cell is None:
+                continue
+            v = cell.data(Qt.ItemDataRole.UserRole)
+            if v is not None and str(getattr(v, "vid", "")) in want:
+                cell.setCheckState(Qt.CheckState.Checked)
+                n += 1
+        self.table_videos.blockSignals(False)
+        self._update_pick()
+        if not n:
+            self.notify("所选作品不在当前列表中", "warn")
+            return
+        self.start_download()
 
     def _row_state(self, idx: int, status: str, pct: int) -> None:
         if idx >= self.table_queue.rowCount():

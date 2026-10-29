@@ -156,6 +156,11 @@ class HuangguoPage(Page):
         self.ed_filter = SearchInput("筛选剧名…", width=170)
         self.ed_filter.textChanged.connect(self._filter)
         lh.addWidget(self.ed_filter)
+        self.btn_batch = QPushButton("批量选择")
+        self.btn_batch.setObjectName("Ghost")
+        self.btn_batch.setToolTip("进入多选模式：在封面墙上勾选多部剧，再点底部「批量下载」")
+        self.btn_batch.clicked.connect(lambda: self.grid.enter_select_mode())
+        lh.addWidget(self.btn_batch)
         self.sp_pages = QSpinBox()
         self.sp_pages.setRange(1, 10)
         self.sp_pages.setValue(2)
@@ -195,6 +200,15 @@ class HuangguoPage(Page):
         self.grid.selected.connect(self._on_card_selected)
         # 「加载更多」：先把本地还没显示完的翻出来，本地翻完了再去抓下一页
         self.grid.set_more_loader(self._load_more_online)
+        # 封面墙多选 / 筛选清除：接住网格发出的信号
+        self.grid.batch_download_requested.connect(self._grid_batch_download)
+        self.grid.clear_filter_requested.connect(self._clear_grid_filter)
+        # 排序：按剧名 / 按集数（默认不排序，用户点下拉才排）
+        self.grid.set_sort_options([
+            {"label": "按剧名", "key": "title"},
+            {"label": "按集数多→少", "key": "episode_count", "reverse": True,
+             "fn": lambda d: int(d.get("episode_count") or 0)},
+        ])
         ll.addWidget(self.grid, 1)
         split.addWidget(left)
 
@@ -946,6 +960,62 @@ class HuangguoPage(Page):
         self.lbl_q.setText(f"已入队 {len(tasks)} 集")
         self.tabs.setCurrentIndex(1)
         self.start_queue()
+
+    # ------------------------------------------------------- 封面墙批量下载
+    def _grid_batch_download(self, keys: list) -> None:
+        """封面墙多选后点「批量下载」：后台逐部取集数，再全部入队。"""
+        if not self._ensure():
+            return
+        items = self.grid.items_for_keys(keys)
+        dramas = [it.get("data") or it for it in items]
+        dramas = [d for d in dramas if d.get("did")]
+        if not dramas:
+            self.notify("没有可批量下载的剧", "warn")
+            return
+        self.notify(f"正在为选中的 {len(dramas)} 部剧加载集数…", "ok")
+        site_id = self._ns.config.ACTIVE_SITE_ID
+
+        def _run():
+            out = []
+            for d in dramas:
+                try:
+                    detail = self._ns.site_api.load_detail_for(site_id, d.get("did"))
+                except Exception:                       # noqa: BLE001
+                    detail = None
+                eps = list((detail or {}).get("episodes") or [])
+                out.append((d, eps))
+            return out
+
+        def _done(results):
+            n = 0
+            for d, eps in results:
+                did = d.get("did")
+                title = d.get("title", "") or str(did)
+                if not eps:
+                    continue
+                try:
+                    self._queue.add_many(did, title, eps)
+                    n += len(eps)
+                except Exception:                       # noqa: BLE001
+                    pass
+            if not n:
+                self.notify("所选剧目暂无可下载的集（可能未联网或站点结构变化）", "warn")
+                return
+            self.tabs.setCurrentIndex(1)
+            self.start_queue()
+            self.notify(f"已加入队列 {n} 集", "ok")
+
+        task = Task(_run)
+        task.done.connect(_done)
+        task.failed.connect(
+            lambda tb: self.notify("批量加载失败：" + tb.splitlines()[-1][:120], "err"))
+        CENTER.start(task)
+
+    def _clear_grid_filter(self) -> None:
+        try:
+            self.ed_filter.setText("")
+        except Exception:                               # noqa: BLE001
+            pass
 
     def start_queue(self) -> None:
         if not self._ensure():

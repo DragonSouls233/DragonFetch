@@ -236,6 +236,11 @@ class JiusePage(Page):
         row4.addWidget(self.lbl_pick, 1)
         row4.addWidget(self.btn_stop)
         row4.addWidget(self.btn_dl)
+        self.btn_wall_batch = QPushButton("批量选择")
+        self.btn_wall_batch.setObjectName("Ghost")
+        self.btn_wall_batch.setToolTip("进入封面墙多选模式：勾选多张封面后点底部「批量下载」")
+        self.btn_wall_batch.clicked.connect(lambda: self.wall.enter_select_mode())
+        row4.addWidget(self.btn_wall_batch)
         gl.addLayout(row4)
 
         self.table = make_table(["选择", "封面 / 标题", "作者", "地址"],
@@ -524,6 +529,14 @@ class JiusePage(Page):
         self.wall.selected.connect(self._on_wall_selected)
         self.wall.activated.connect(self._on_wall_activated)
         self.wall.setMinimumHeight(260)
+        # 封面墙多选下载：勾选多张封面 → 在列表里打勾 → 走既有下载流
+        self.wall.batch_download_requested.connect(self._wall_batch_download)
+        # 排序：按标题 / 按集数
+        self.wall.set_sort_options([
+            {"label": "按标题", "key": "title"},
+            {"label": "按集数多→少", "key": "total", "reverse": True,
+             "fn": lambda d: int(d.get("total") or 0)},
+        ])
 
     def _on_wall_selected(self, item: dict) -> None:
         it = item.get("data") or item
@@ -676,6 +689,29 @@ class JiusePage(Page):
         self.btn_dl.setEnabled(False)
         self.lbl_q.setText(f"下载中 · {len(picked)} 条（91 系站点可能需要 Cookie，失败请用浏览器）")
         self._worker.start()
+
+    # --------------------------------------------------- 封面墙批量下载
+    def _wall_batch_download(self, keys: list) -> None:
+        """封面墙多选后点「批量下载」：把选中的封面在列表里打勾，再走下载流。"""
+        want = {str(k) for k in keys}
+        if not want:
+            return
+        self.table.blockSignals(True)
+        n = 0
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is None:
+                continue
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and str(data.get("url", "")) in want:
+                it.setCheckState(Qt.CheckState.Checked)
+                n += 1
+        self.table.blockSignals(False)
+        self._update_pick()
+        if not n:
+            self.notify("所选条目不在当前列表中", "warn")
+            return
+        self.start_download()
 
     def _row_state(self, idx: int, status: str, pct: int) -> None:
         if idx >= self.table_q.rowCount():
